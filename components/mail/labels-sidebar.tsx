@@ -12,7 +12,15 @@ interface LabelWithCount {
   count: number
 }
 
-export function LabelsSidebar({ emailAccountId, grantId }: { emailAccountId?: string; grantId?: string }) {
+export function LabelsSidebar({
+  emailAccountId,
+  grantId,
+  onLabelSelect,
+}: {
+  emailAccountId?: string
+  grantId?: string
+  onLabelSelect?: (labelId: string, labelName: string) => void
+}) {
   const [labels, setLabels] = useState<LabelWithCount[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null)
@@ -67,6 +75,15 @@ export function LabelsSidebar({ emailAccountId, grantId }: { emailAccountId?: st
     fetchLabelsWithCounts()
   }, [emailAccountId, supabase])
 
+  const handleLabelClick = (label: LabelWithCount) => {
+    const isSelected = selectedLabel === label.id
+    setSelectedLabel(isSelected ? null : label.id)
+
+    if (!isSelected && onLabelSelect) {
+      onLabelSelect(label.id, label.name)
+    }
+  }
+
   return (
     <div className="mb-4">
       <div className="px-3 py-2">
@@ -86,7 +103,7 @@ export function LabelsSidebar({ emailAccountId, grantId }: { emailAccountId?: st
               {labels.map((label) => (
                 <button
                   key={label.id}
-                  onClick={() => setSelectedLabel(selectedLabel === label.id ? null : label.id)}
+                  onClick={() => handleLabelClick(label)}
                   className={`w-full flex items-center justify-between px-2 py-2 text-sm rounded-md transition-colors ${
                     selectedLabel === label.id
                       ? 'bg-gray-200 dark:bg-gray-700'

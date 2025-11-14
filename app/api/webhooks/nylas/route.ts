@@ -233,6 +233,38 @@ async function getEmailAccountId(grantId: string): Promise<{ id: string; userId:
 }
 
 /**
+ * Find user ID by recipient email
+ */
+async function getUserIdByRecipientEmail(toEmail: string): Promise<string | null> {
+  try {
+    if (!supabaseAdmin) {
+      console.error('❌ Supabase admin client not available')
+      return null
+    }
+
+    console.log(`🔍 Looking for recipient email: ${toEmail}`)
+
+    const { data, error } = await supabaseAdmin!
+      .from('email_accounts')
+      .select('user_id')
+      .eq('email', toEmail)
+      .single()
+
+    if (error) {
+      console.warn(`⚠️ Recipient email not found: ${toEmail}`)
+      return null
+    }
+
+    const userId = data?.user_id
+    console.log(`✅ Found recipient user ID: ${userId}`)
+    return userId || null
+  } catch (error) {
+    console.error('❌ Error finding recipient user:', error)
+    return null
+  }
+}
+
+/**
  * Save label to message_custom_labels table
  */
 async function labelMessage(
@@ -302,10 +334,12 @@ async function handleMessageCreated(message: any): Promise<void> {
     const grantId = msg.grant_id
     const subject = msg.subject || ''
     const body = msg.body || ''
+    const toEmails = msg.to || []
 
     console.log(`📨 Processing new message: ${messageId}`)
     console.log(`   Grant ID: ${grantId}`)
     console.log(`   Subject: ${subject}`)
+    console.log(`   To: ${toEmails.map((t: any) => t.email).join(', ')}`)
 
     if (!messageId || !grantId) {
       console.error('❌ Missing messageId or grantId')
@@ -313,8 +347,8 @@ async function handleMessageCreated(message: any): Promise<void> {
       return
     }
 
-    // Get email account ID and user ID
-    console.log('🔍 Looking up email account...')
+    // Get email account ID (sender's account)
+    console.log('🔍 Looking up sender email account...')
     const accountInfo = await getEmailAccountId(grantId)
     
     if (!accountInfo) {
@@ -322,7 +356,19 @@ async function handleMessageCreated(message: any): Promise<void> {
       return
     }
     
-    console.log(`✅ Found email account: ${accountInfo.id}, user: ${accountInfo.userId}`)
+    console.log(`✅ Found sender account: ${accountInfo.id}, user: ${accountInfo.userId}`)
+
+    // Find recipient user ID from 'to' field
+    let recipientUserId = null
+    if (toEmails.length > 0) {
+      const firstRecipientEmail = toEmails[0].email
+      console.log(`🔍 Looking for recipient user with email: ${firstRecipientEmail}`)
+      recipientUserId = await getUserIdByRecipientEmail(firstRecipientEmail)
+    }
+
+    // Use recipient user ID if found, otherwise use sender's user ID
+    const appliedByUserId = recipientUserId || accountInfo.userId
+    console.log(`💾 Will save applied_by as: ${appliedByUserId} (recipient: ${recipientUserId}, sender: ${accountInfo.userId})`)
 
     // Extract text from body
     const emailBody = body || ''
@@ -354,13 +400,14 @@ async function handleMessageCreated(message: any): Promise<void> {
       folders: msg.folders,
       unread: msg.unread,
       starred: msg.starred,
+      grant_id: msg.grant_id,
     }
 
     // Save label to database
     console.log(`💾 Saving label: ${labelName}`)
     const success = await labelMessage(
       accountInfo.id,
-      accountInfo.userId,
+      appliedByUserId,
       messageId,
       labelName,
       mailDetails
