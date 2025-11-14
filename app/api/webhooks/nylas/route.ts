@@ -288,14 +288,22 @@ async function labelMessage(
  */
 async function handleMessageCreated(message: any): Promise<void> {
   try {
-    const { id: messageId, grant_id: grantId, subject, body, html } = message
+    console.log(`\n📨 Raw message object:`, JSON.stringify(message, null, 2))
 
-    console.log(`\n📨 Processing new message: ${messageId}`)
+    // Try multiple property name possibilities
+    const messageId = message.id || message.message_id || message.messageId
+    const grantId = message.grant_id || message.grantId || message.account_id
+    const subject = message.subject || ''
+    const body = message.body || message.text_body || ''
+    const html = message.html || message.html_body || ''
+
+    console.log(`📨 Processing new message: ${messageId}`)
     console.log(`   Grant ID: ${grantId}`)
     console.log(`   Subject: ${subject}`)
 
     if (!messageId || !grantId) {
       console.error('❌ Missing messageId or grantId')
+      console.error(`   messageId=${messageId}, grantId=${grantId}`)
       return
     }
 
