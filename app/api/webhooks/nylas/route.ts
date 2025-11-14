@@ -288,14 +288,16 @@ async function labelMessage(
  */
 async function handleMessageCreated(message: any): Promise<void> {
   try {
-    console.log(`\n📨 Raw message object:`, JSON.stringify(message, null, 2))
+    // Nylas sends data nested in 'object' property
+    const msg = message.object || message
 
-    // Try multiple property name possibilities
-    const messageId = message.id || message.message_id || message.messageId
-    const grantId = message.grant_id || message.grantId || message.account_id
-    const subject = message.subject || ''
-    const body = message.body || message.text_body || ''
-    const html = message.html || message.html_body || ''
+    console.log(`\n📨 Extracted message:`, JSON.stringify(msg, null, 2).substring(0, 500))
+
+    // Get properties from the actual message object
+    const messageId = msg.id
+    const grantId = msg.grant_id
+    const subject = msg.subject || ''
+    const body = msg.body || ''
 
     console.log(`📨 Processing new message: ${messageId}`)
     console.log(`   Grant ID: ${grantId}`)
@@ -318,8 +320,8 @@ async function handleMessageCreated(message: any): Promise<void> {
     
     console.log(`✅ Found email account: ${emailAccountId}`)
 
-    // Extract text from body or html
-    const emailBody = body || html || ''
+    // Extract text from body
+    const emailBody = body || ''
 
     // Truncate for AI to avoid token limits
     const truncatedBody = emailBody.substring(0, 2000)
