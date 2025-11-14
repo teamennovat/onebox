@@ -1,193 +1,132 @@
-/**
- * Webhook Testing Endpoint
- * 
- * Use this endpoint to test your webhook implementation locally
- * 
- * Available endpoints:
- * - GET /api/webhooks/test - Get test webhook information
- * - POST /api/webhooks/test/send - Send a test webhook event
- * - POST /api/webhooks/test/generate - Generate test payload with signature
- * - GET /api/webhooks/test/queue - View webhook event queue status
- * - POST /api/webhooks/test/queue/clear - Clear webhook event queue
- */
-
 import { NextRequest, NextResponse } from 'next/server'
-import {
-  createWebhookSignature,
-  generateTestWebhookPayload,
-  getMockNotificationPayload,
-  getQueueStatus,
-  clearQueue,
-  formatEventLog,
-} from '@/lib/webhook-utils'
-
-// Only allow in development
-function isDevelopment() {
-  return process.env.NODE_ENV === 'development'
-}
+import crypto from 'crypto'
+import { supabaseAdmin } from '@/lib/supabase'
 
 /**
- * GET /api/webhooks/test
- * Get test webhook information and help
- */
-export async function GET(request: NextRequest) {
-  if (!isDevelopment()) {
-    return new NextResponse('Not available in production', { status: 403 })
-  }
-
-  const { searchParams } = new URL(request.url)
-
-  // If requesting queue status
-  if (searchParams.get('queue') === 'true') {
-    return NextResponse.json({
-      status: 'success',
-      queueStatus: getQueueStatus(),
-    })
-  }
-
-  // Otherwise return help information
-  return NextResponse.json({
-    webhook: {
-      url: `${process.env.NEXTAUTH_URL}/api/webhooks/nylas`,
-      secret: process.env.NYLAS_WEBHOOK_SECRET
-        ? '••••••••' + process.env.NYLAS_WEBHOOK_SECRET.slice(-8)
-        : 'NOT SET',
-    },
-    endpoints: {
-      'GET /api/webhooks/test': 'Get this help message',
-      'GET /api/webhooks/test?queue=true': 'View webhook event queue status',
-      'POST /api/webhooks/test/send': 'Send a test webhook event',
-      'POST /api/webhooks/test/generate': 'Generate test payload with signature',
-      'POST /api/webhooks/test/queue/clear': 'Clear webhook event queue',
-    },
-    testing: {
-      curl_verify: `curl -X GET "${process.env.NEXTAUTH_URL}/api/webhooks/nylas?challenge=test_challenge"`,
-      curl_send:
-        'curl -X POST with x-nylas-signature header (see /api/webhooks/test/send)',
-    },
-  })
-}
-
-/**
- * POST /api/webhooks/test/send
- * Send a test webhook event to your webhook endpoint
+ * TEST ENDPOINT: Simulate incoming email from Nylas
+ * Automatically gets grant_id from your email_accounts table
  * 
- * Body:
- * {
- *   "eventType": "message.created",  // or any supported event type
- *   "data": { ... }                   // optional custom data
- * }
+ * Usage:
+ * curl https://onebox-eight-delta.vercel.app/api/webhooks/nylas/test \
+ *   -H "Content-Type: application/json" \
+ *   -d '{
+ *     "subject": "50% off everything",
+ *     "body": "Limited time offer on all products"
+ *   }'
  */
+
 export async function POST(request: NextRequest) {
-  if (!isDevelopment()) {
-    return new NextResponse('Not available in production', { status: 403 })
-  }
+  try {
+    const body = await request.json()
+    let { subject, body: emailBody, grantId } = body
 
-  const url = new URL(request.url)
-
-  // Handle queue clear endpoint
-  if (url.pathname.endsWith('/queue/clear')) {
-    clearQueue()
-    return NextResponse.json({
-      status: 'success',
-      message: 'Queue cleared',
-    })
-  }
-
-  // Handle generate endpoint
-  if (url.pathname.endsWith('/generate')) {
-    try {
-      const body = await request.json()
-      const eventType = body.eventType || 'message.created'
-      const customData = body.data || {}
-
-      const payload = generateTestWebhookPayload(eventType, customData)
-      const payloadString = JSON.stringify(payload)
-      const signature = createWebhookSignature(
-        payloadString,
-        process.env.NYLAS_WEBHOOK_SECRET || 'test_secret'
-      )
-
-      return NextResponse.json({
-        status: 'success',
-        payload,
-        signature,
-        curlCommand: `curl -X POST "${process.env.NEXTAUTH_URL}/api/webhooks/nylas" \\
-  -H "x-nylas-signature: ${signature}" \\
-  -H "Content-Type: application/json" \\
-  -d '${payloadString}'`,
-        headers: {
-          'x-nylas-signature': signature,
-          'Content-Type': 'application/json',
-        },
-      })
-    } catch (error) {
+    if (!subject || !emailBody) {
       return NextResponse.json(
-        {
-          status: 'error',
-          message: 'Failed to generate test payload',
-          error: String(error),
-        },
+        { error: 'Missing subject or body' },
         { status: 400 }
       )
     }
-  }
 
-  // Handle send endpoint
-  if (url.pathname.endsWith('/send')) {
-    try {
-      const body = await request.json()
-      const eventType = body.eventType || 'message.created'
-      const customData = body.data || {}
+    // If no grantId provided, get the first one from database
+    if (!grantId) {
+      if (!supabaseAdmin) {
+        return NextResponse.json(
+          { error: 'Cannot fetch grant_id from database' },
+          { status: 500 }
+        )
+      }
 
-      // Generate test payload
-      const payload = generateTestWebhookPayload(eventType, customData)
-      const payloadString = JSON.stringify(payload)
+      const { data, error } = await supabaseAdmin!
+        .from('email_accounts')
+        .select('grant_id')
+        .limit(1)
+        .single()
 
-      // Create signature
-      const signature = createWebhookSignature(
-        payloadString,
-        process.env.NYLAS_WEBHOOK_SECRET || 'test_secret'
-      )
+      if (error || !data?.grant_id) {
+        return NextResponse.json(
+          { error: 'No email accounts found. Connect an account first.' },
+          { status: 400 }
+        )
+      }
 
-      // Send to webhook endpoint
-      const webhookUrl = `${process.env.NEXTAUTH_URL}/api/webhooks/nylas`
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: {
-          'x-nylas-signature': signature,
-          'Content-Type': 'application/json',
-        },
-        body: payloadString,
-      })
-
-      const responseText = await response.text()
-
-      return NextResponse.json({
-        status: 'success',
-        message: 'Test webhook sent',
-        sentPayload: payload,
-        webhookResponse: {
-          status: response.status,
-          statusText: response.statusText,
-          body: responseText,
-        },
-        eventLog: formatEventLog(payload),
-      })
-    } catch (error) {
-      return NextResponse.json(
-        {
-          status: 'error',
-          message: 'Failed to send test webhook',
-          error: String(error),
-        },
-        { status: 500 }
-      )
+      grantId = data.grant_id
     }
-  }
 
-  return NextResponse.json(
-    { status: 'error', message: 'Unknown endpoint' },
-    { status: 404 }
-  )
+    // Generate a fake message ID
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(7)}`
+
+    // Create test webhook payload
+    const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET || 'test_secret'
+
+    const payload = {
+      type: 'message.created',
+      data: [
+        {
+          id: messageId,
+          grant_id: grantId,
+          subject: subject,
+          body: emailBody,
+          html: `<p>${emailBody.replace(/\n/g, '<br>')}</p>`,
+        },
+      ],
+    }
+
+    const rawBody = JSON.stringify(payload)
+    const signature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(rawBody)
+      .digest('hex')
+
+    // Call webhook endpoint
+    const webhookUrl = new URL('/api/webhooks/nylas', request.nextUrl.origin)
+    const webhookResponse = await fetch(webhookUrl.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-nylas-signature': signature,
+      },
+      body: rawBody,
+    })
+
+    const webhookData = await webhookResponse.text()
+
+    return NextResponse.json({
+      success: true,
+      message: 'Test webhook sent successfully',
+      messageId: messageId,
+      grantId: grantId,
+      payload: payload,
+      webhookStatus: webhookResponse.status,
+      next: 'Wait 3-5 seconds then check database: SELECT * FROM message_custom_labels ORDER BY applied_at DESC LIMIT 1;',
+    })
+  } catch (error) {
+    console.error('Test endpoint error:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function GET(request: NextRequest) {
+  return NextResponse.json({
+    message: 'Test endpoint for webhook simulation',
+    endpoint: 'POST /api/webhooks/nylas/test',
+    usage: 'Send JSON with subject and body',
+    note: 'grantId is auto-detected from your first connected email account',
+    examples: [
+      {
+        subject: '50% off sale',
+        body: 'Limited time offer on all products - buy now!',
+      },
+      {
+        subject: 'Team Meeting Tomorrow at 2pm',
+        body: 'We have a team sync scheduled for tomorrow at 2pm EST',
+      },
+      {
+        subject: 'Invoice #12345',
+        body: 'Please find your invoice attached. Payment due by end of month.',
+      },
+    ],
+  })
 }
