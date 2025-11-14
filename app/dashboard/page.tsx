@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { createBrowserClient } from '@supabase/ssr'
 import dynamic from 'next/dynamic'
@@ -22,7 +22,7 @@ interface Message {
   date: string
 }
 
-export default function Dashboard() {
+function DashboardContent() {
   const [supabaseClient] = useState(() =>
     createBrowserClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -31,6 +31,12 @@ export default function Dashboard() {
   )
   const [user, setUser] = useState<any | null>(null)
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const [accounts, setAccounts] = useState<EmailAccount[]>([])
+  const [selectedAccount, setSelectedAccount] = useState<EmailAccount | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   // Load current user from Supabase auth on client and listen for auth changes
   const checkAndFetchAccounts = useCallback(async () => {
@@ -43,8 +49,7 @@ export default function Dashboard() {
       if (response.ok) {
         setAccounts(data.accounts)
         // If we just connected a new account, select it
-        const params = new URLSearchParams(window.location.search)
-        const justConnected = params.get('email')
+        const justConnected = searchParams.get('email')
         const newAccount = data.accounts.find((acc: EmailAccount) => acc.email === justConnected)
         if (newAccount) {
           setSelectedAccount(newAccount)
@@ -57,7 +62,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false)
     }
-  }, [user?.id])
+  }, [user?.id, searchParams])
 
   useEffect(() => {
     let mounted = true
@@ -135,12 +140,6 @@ export default function Dashboard() {
       checkAndFetchAccounts()
     }
   }, [user, checkAndFetchAccounts])
-  const searchParams = useSearchParams()
-  const [accounts, setAccounts] = useState<EmailAccount[]>([])
-  const [selectedAccount, setSelectedAccount] = useState<EmailAccount | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
 
   // Fetch connected accounts
   const fetchAccounts = useCallback(async () => {
@@ -153,8 +152,8 @@ export default function Dashboard() {
       if (response.ok) {
         setAccounts(data.accounts)
         // If we just connected a new account, select it
-  const justConnected = searchParams.get('email')
-  const newAccount = data.accounts.find((acc: EmailAccount) => acc.email === justConnected)
+        const justConnected = searchParams.get('email')
+        const newAccount = data.accounts.find((acc: EmailAccount) => acc.email === justConnected)
         if (newAccount) {
           setSelectedAccount(newAccount)
         }
@@ -213,7 +212,7 @@ export default function Dashboard() {
   return (
     <div className="container mx-auto p-4">
       {/* Success message */}
-  {searchParams.get('success') === 'account_connected' && (
+      {searchParams.get('success') === 'account_connected' && (
         <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4">
           Successfully connected {searchParams.get('email')}!
         </div>
@@ -262,5 +261,20 @@ export default function Dashboard() {
         </div>
       )}
     </div>
+  )
+}
+
+export default function Dashboard() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="p-4 text-center">
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
+          <div>Loading dashboard...</div>
+        </div>
+      </div>
+    }>
+      <DashboardContent />
+    </Suspense>
   )
 }
