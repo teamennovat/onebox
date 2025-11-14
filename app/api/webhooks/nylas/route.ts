@@ -207,7 +207,7 @@ ${body}`
 /**
  * Get email_account_id from grant_id
  */
-async function getEmailAccountId(grantId: string): Promise<string | null> {
+async function getEmailAccountId(grantId: string): Promise<{ id: string; userId: string } | null> {
   try {
     if (!supabaseAdmin) {
       console.error('❌ Supabase admin client not available')
@@ -216,7 +216,7 @@ async function getEmailAccountId(grantId: string): Promise<string | null> {
 
     const { data, error } = await supabaseAdmin!
       .from('email_accounts')
-      .select('id')
+      .select('id, user_id')
       .eq('grant_id', grantId)
       .single()
 
@@ -225,7 +225,7 @@ async function getEmailAccountId(grantId: string): Promise<string | null> {
       return null
     }
 
-    return data?.id || null
+    return { id: data?.id || '', userId: data?.user_id || '' }
   } catch (error) {
     console.error('❌ Error querying email account:', error)
     return null
@@ -237,8 +237,10 @@ async function getEmailAccountId(grantId: string): Promise<string | null> {
  */
 async function labelMessage(
   emailAccountId: string,
+  userId: string,
   messageId: string,
-  labelName: string
+  labelName: string,
+  mailDetails: any
 ): Promise<boolean> {
   try {
     if (!supabaseAdmin) {
@@ -253,7 +255,7 @@ async function labelMessage(
       return false
     }
 
-    console.log(`💾 Saving to database: accountId=${emailAccountId}, messageId=${messageId}, labelId=${labelId}`)
+    console.log(`💾 Saving to database: accountId=${emailAccountId}, userId=${userId}, messageId=${messageId}, labelId=${labelId}`)
 
     const { data, error } = await supabaseAdmin!
       .from('message_custom_labels')
@@ -261,7 +263,9 @@ async function labelMessage(
         email_account_id: emailAccountId,
         message_id: messageId,
         custom_label_id: labelId,
+        applied_by: userId,
         applied_at: new Date().toISOString(),
+        mail_details: mailDetails,
       })
       .select()
 
@@ -309,16 +313,16 @@ async function handleMessageCreated(message: any): Promise<void> {
       return
     }
 
-    // Get email account ID
+    // Get email account ID and user ID
     console.log('🔍 Looking up email account...')
-    const emailAccountId = await getEmailAccountId(grantId)
+    const accountInfo = await getEmailAccountId(grantId)
     
-    if (!emailAccountId) {
+    if (!accountInfo) {
       console.error(`❌ Could not find email account for grant: ${grantId}`)
       return
     }
     
-    console.log(`✅ Found email account: ${emailAccountId}`)
+    console.log(`✅ Found email account: ${accountInfo.id}, user: ${accountInfo.userId}`)
 
     // Extract text from body
     const emailBody = body || ''
@@ -335,9 +339,32 @@ async function handleMessageCreated(message: any): Promise<void> {
       return
     }
 
+    // Prepare mail details object
+    const mailDetails = {
+      subject: msg.subject,
+      from: msg.from,
+      to: msg.to,
+      cc: msg.cc,
+      bcc: msg.bcc,
+      snippet: msg.snippet,
+      body: msg.body,
+      attachments: msg.attachments,
+      date: msg.date,
+      thread_id: msg.thread_id,
+      folders: msg.folders,
+      unread: msg.unread,
+      starred: msg.starred,
+    }
+
     // Save label to database
     console.log(`💾 Saving label: ${labelName}`)
-    const success = await labelMessage(emailAccountId, messageId, labelName)
+    const success = await labelMessage(
+      accountInfo.id,
+      accountInfo.userId,
+      messageId,
+      labelName,
+      mailDetails
+    )
 
     if (success) {
       console.log(`✨ Successfully labeled message ${messageId} → ${labelName}`)
