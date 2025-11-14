@@ -1,0 +1,60 @@
+/* Quill Core Styles */
+@import 'react-quill-new/dist/quill.snow.css';
+
+/* Custom Quill Styles */
+.quill-wrapper {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.quill-wrapper .ql-container {
+  flex: 1;
+  overflow-y: auto;
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+}
+
+.quill-wrapper .ql-toolbar {
+  background-color: var(--background);
+  border-color: var(--border);
+  border-top-left-radius: calc(var(--radius) - 2px);
+  border-top-right-radius: calc(var(--radius) - 2px);
+}
+
+.quill-wrapper .ql-container {
+  border-bottom-left-radius: calc(var(--radius) - 2px);
+  border-bottom-right-radius: calc(var(--radius) - 2px);
+}
+
+.quill-wrapper .ql-editor {
+  min-height: 200px;
+  line-height: 1.5;
+}
+
+/* Dark mode support */
+.dark .quill-wrapper .ql-toolbar {
+  background-color: var(--card);
+  border-color: var(--border);
+}
+
+.dark .quill-wrapper .ql-container {
+  background-color: var(--card);
+  border-color: var(--border);
+}
+
+.dark .quill-wrapper .ql-editor {
+  color: var(--foreground);
+}
+
+.dark .quill-wrapper .ql-stroke {
+  stroke: var(--foreground);
+}
+
+.dark .quill-wrapper .ql-fill {
+  fill: var(--foreground);
+}
+
+.dark .quill-wrapper .ql-picker {
+  color: var(--foreground);
+}
