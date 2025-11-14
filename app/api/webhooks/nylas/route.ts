@@ -106,6 +106,8 @@ async function classifyMessageWithAI(subject: string, body: string): Promise<str
       return null
     }
 
+    console.log('🤖 Calling Nebius AI for classification...')
+
     const systemPrompt = `You are an email-classification assistant.
 Your task is to read the email content and classify it into exactly one of the following labels:
 - To Respond – The sender expects or requests a reply.
@@ -129,6 +131,11 @@ If unsure, choose the label that best fits the main intent.`
 
 ${body}`
 
+    console.log('📡 Sending request to Nebius API...')
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
     const response = await fetch('https://api.tokenfactory.nebius.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -144,14 +151,21 @@ ${body}`
           { role: 'user', content: userContent },
         ],
       }),
+      signal: controller.signal,
     })
 
+    clearTimeout(timeoutId)
+    console.log(`🔄 AI API response status: ${response.status}`)
+
     if (!response.ok) {
-      console.error(`❌ AI API error: ${response.status}`)
+      const errorData = await response.text()
+      console.error(`❌ AI API error: ${response.status}`, errorData)
       return null
     }
 
     const data = await response.json()
+    console.log(`📥 AI response:`, JSON.stringify(data, null, 2))
+    
     const aiResponse = data.choices?.[0]?.message?.content
 
     if (!aiResponse) {
@@ -159,13 +173,26 @@ ${body}`
       return null
     }
 
+    console.log(`📝 AI raw response: ${aiResponse}`)
+
+    // Clean up markdown code blocks if present
+    let cleanedResponse = aiResponse.trim()
+    if (cleanedResponse.startsWith('```json')) {
+      cleanedResponse = cleanedResponse.replace(/^```json\n?/, '').replace(/\n?```$/, '')
+    } else if (cleanedResponse.startsWith('```')) {
+      cleanedResponse = cleanedResponse.replace(/^```\n?/, '').replace(/\n?```$/, '')
+    }
+
+    console.log(`🧹 Cleaned response: ${cleanedResponse}`)
+
     // Parse JSON response from AI
-    const parsed = JSON.parse(aiResponse)
+    const parsed = JSON.parse(cleanedResponse)
     const labelName = parsed.label
 
     // Validate label name
     if (!labelName || !LABEL_MAP[labelName]) {
       console.warn(`⚠️ Invalid label from AI: ${labelName}`)
+      console.warn(`Available labels: ${Object.keys(LABEL_MAP).join(', ')}`)
       return null
     }
 
@@ -222,11 +249,13 @@ async function labelMessage(
     const labelId = LABEL_MAP[labelName]
 
     if (!labelId) {
-      console.error(`❌ Label not found: ${labelName}`)
+      console.error(`❌ Label not found in LABEL_MAP: ${labelName}`)
       return false
     }
 
-    const { error } = await supabaseAdmin!
+    console.log(`💾 Saving to database: accountId=${emailAccountId}, messageId=${messageId}, labelId=${labelId}`)
+
+    const { data, error } = await supabaseAdmin!
       .from('message_custom_labels')
       .insert({
         email_account_id: emailAccountId,
@@ -234,6 +263,7 @@ async function labelMessage(
         custom_label_id: labelId,
         applied_at: new Date().toISOString(),
       })
+      .select()
 
     if (error) {
       // Check if it's a duplicate (already labeled)
@@ -241,11 +271,11 @@ async function labelMessage(
         console.log(`ℹ️ Message already labeled: ${messageId}`)
         return true
       }
-      console.error('❌ Error saving label:', error)
+      console.error('❌ Error saving label:', JSON.stringify(error, null, 2))
       return false
     }
 
-    console.log(`✅ Labeled message ${messageId} with ${labelName}`)
+    console.log(`✅ Label saved successfully:`, JSON.stringify(data, null, 2))
     return true
   } catch (error) {
     console.error('❌ Error in labelMessage:', error)
@@ -261,13 +291,24 @@ async function handleMessageCreated(message: any): Promise<void> {
     const { id: messageId, grant_id: grantId, subject, body, html } = message
 
     console.log(`\n📨 Processing new message: ${messageId}`)
+    console.log(`   Grant ID: ${grantId}`)
+    console.log(`   Subject: ${subject}`)
+
+    if (!messageId || !grantId) {
+      console.error('❌ Missing messageId or grantId')
+      return
+    }
 
     // Get email account ID
+    console.log('🔍 Looking up email account...')
     const emailAccountId = await getEmailAccountId(grantId)
+    
     if (!emailAccountId) {
       console.error(`❌ Could not find email account for grant: ${grantId}`)
       return
     }
+    
+    console.log(`✅ Found email account: ${emailAccountId}`)
 
     // Extract text from body or html
     const emailBody = body || html || ''
@@ -276,6 +317,7 @@ async function handleMessageCreated(message: any): Promise<void> {
     const truncatedBody = emailBody.substring(0, 2000)
 
     // Classify with AI
+    console.log('🤖 Starting AI classification...')
     const labelName = await classifyMessageWithAI(subject || '', truncatedBody)
 
     if (!labelName) {
@@ -284,10 +326,13 @@ async function handleMessageCreated(message: any): Promise<void> {
     }
 
     // Save label to database
+    console.log(`💾 Saving label: ${labelName}`)
     const success = await labelMessage(emailAccountId, messageId, labelName)
 
     if (success) {
       console.log(`✨ Successfully labeled message ${messageId} → ${labelName}`)
+    } else {
+      console.error(`❌ Failed to save label for message ${messageId}`)
     }
   } catch (error) {
     console.error('❌ Error handling message.created:', error)
@@ -335,15 +380,21 @@ export async function POST(request: NextRequest) {
     const messages = Array.isArray(payload.data) ? payload.data : [payload.data]
     console.log(`Processing ${messages.length} message(s)`)
 
-    // Process messages asynchronously (don't wait for AI/DB)
-    for (const message of messages) {
-      handleMessageCreated(message).catch(error => {
-        console.error('❌ Error processing message:', error)
-      })
-    }
+    // Process messages with proper error handling
+    const results = await Promise.allSettled(
+      messages.map((message: any) => handleMessageCreated(message))
+    )
+
+    // Log results
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        console.log(`✅ Message ${index + 1} processed successfully`)
+      } else {
+        console.error(`❌ Message ${index + 1} failed:`, result.reason)
+      }
+    })
 
     // Respond immediately with 200 OK
-    // Messages are processed in the background
     console.log('📤 Responded with 200 OK')
     return new NextResponse('OK', { status: 200 })
   } catch (error) {
