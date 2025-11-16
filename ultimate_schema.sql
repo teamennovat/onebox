@@ -84,6 +84,8 @@ CREATE TABLE message_custom_labels (
   -- Use TEXT[] to allow multiple grant_ids for multi-recipient messages.
   applied_by TEXT[] DEFAULT ARRAY[]::text[],
   applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  -- Full email data (subject, body, attachments, etc.) stored as JSONB for labeled email display
+  mail_details JSONB DEFAULT '{}'::jsonb,
   UNIQUE(email_account_id, message_id, custom_label_id)
 );
 
