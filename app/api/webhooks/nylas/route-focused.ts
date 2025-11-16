@@ -206,12 +206,46 @@ async function getEmailAccountId(grantId: string): Promise<string | null> {
 }
 
 /**
+ * Get recipient grant_ids from message 'to' field
+ * Returns array of grant_ids for recipient accounts
+ */
+async function getGrantIdsByRecipientEmails(toEmails: any[]): Promise<string[]> {
+  try {
+    if (!supabaseAdmin || !toEmails || toEmails.length === 0) {
+      return []
+    }
+
+    const recipientEmails = toEmails.map((t: any) => t.email).filter(Boolean)
+
+    if (recipientEmails.length === 0) {
+      return []
+    }
+
+    const { data, error } = await supabaseAdmin!
+      .from('email_accounts')
+      .select('grant_id')
+      .in('email', recipientEmails)
+
+    if (error || !data) {
+      return []
+    }
+
+    return data.map((account: any) => account.grant_id).filter(Boolean)
+  } catch (error) {
+    console.error('❌ Error finding recipient grant IDs:', error)
+    return []
+  }
+}
+
+/**
  * Save label to message_custom_labels table
+ * Note: Applied_by is a TEXT[] array of grant_id strings for account visibility filtering
  */
 async function labelMessage(
   emailAccountId: string,
   messageId: string,
-  labelName: string
+  labelName: string,
+  appliedByGrantIds: string[] = []
 ): Promise<boolean> {
   try {
     const labelId = LABEL_MAP[labelName]
@@ -232,6 +266,7 @@ async function labelMessage(
         email_account_id: emailAccountId,
         message_id: messageId,
         custom_label_id: labelId,
+        applied_by: appliedByGrantIds, // TEXT[] array of grant_id strings
         applied_at: new Date().toISOString(),
       })
 
@@ -258,16 +293,19 @@ async function labelMessage(
  */
 async function handleMessageCreated(message: any): Promise<void> {
   try {
-    const { id: messageId, grant_id: grantId, subject, body, html } = message
+    const { id: messageId, grant_id: grantId, subject, body, html, to: toEmails } = message
 
     console.log(`\n📨 Processing new message: ${messageId}`)
 
-    // Get email account ID
+    // Get email account ID (sender's account)
     const emailAccountId = await getEmailAccountId(grantId)
     if (!emailAccountId) {
       console.error(`❌ Could not find email account for grant: ${grantId}`)
       return
     }
+
+    // Get recipient grant_ids for applied_by visibility filtering
+    const recipientGrantIds = await getGrantIdsByRecipientEmails(toEmails || [])
 
     // Extract text from body or html
     const emailBody = body || html || ''
@@ -283,8 +321,8 @@ async function handleMessageCreated(message: any): Promise<void> {
       return
     }
 
-    // Save label to database
-    const success = await labelMessage(emailAccountId, messageId, labelName)
+    // Save label to database with recipient grant_ids
+    const success = await labelMessage(emailAccountId, messageId, labelName, recipientGrantIds)
 
     if (success) {
       console.log(`✨ Successfully labeled message ${messageId} → ${labelName}`)

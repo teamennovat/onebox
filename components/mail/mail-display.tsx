@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 
 import '@/app/quill.css'
+import { SummaryIcon } from './summary-icon'
 
 // Dynamically import ReactQuill with no SSR
 const ReactQuill = dynamic(
@@ -624,6 +625,10 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
             </TooltipContent>
           </Tooltip>
           <Separator orientation="vertical" className="mx-1 h-6" />
+          {mail && <SummaryIcon email={mail} />}
+
+
+          
           <Tooltip>
             <Popover>
               <PopoverTrigger asChild>

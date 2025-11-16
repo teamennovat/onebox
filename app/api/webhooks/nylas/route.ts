@@ -3,7 +3,7 @@
  * 
  * When a message.created event is received from Nylas:
  * 1. Extract message subject + body
- * 2. Send to AI (Nebius API) for classification
+ * 2. Send to AI (DeepSeek API) for classification
  * 3. Get label name from AI response
  * 4. Find label ID from custom_labels table
  * 5. Save message_id + label_id to message_custom_labels table
@@ -17,11 +17,10 @@ import { supabaseAdmin } from '@/lib/supabase'
 
 // Get webhook secret and AI API key from environment
 const WEBHOOK_SECRET = process.env.NYLAS_WEBHOOK_SECRET
-const NEBIUS_API_KEY = process.env.NEBIUS_API_KEY
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
+const MODEL = 'deepseek-chat'
 
-/**
- * Available labels mapping (matches your database)
- */
 const LABEL_MAP: Record<string, string> = {
   'To Respond': 'e86be808-a059-4eb9-9753-2b3908f804d5',
   'Need Action': 'ddb9aa73-ed78-4eb2-9660-30bc326066c0',
@@ -32,6 +31,27 @@ const LABEL_MAP: Record<string, string> = {
   'Promotion': 'a6537970-7c3b-41ac-b56d-5787c9429ccc',
   'Notification': '044d6fb8-43bd-4042-9006-dc1b064ac744',
   'Purchases': '31d79b25-3357-49bb-bad0-b1881590678e',
+}
+
+/**
+ * Strip HTML tags and entities from text
+ */
+function stripHtmlTags(html: string): string {
+  if (!html) return ''
+  // Remove HTML tags
+  let text = html.replace(/<[^>]*>/g, '')
+  // Decode HTML entities
+  text = text
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&[a-z]+;/gi, ' ')
+  // Clean up multiple spaces
+  text = text.replace(/\s+/g, ' ').trim()
+  return text
 }
 
 /**
@@ -98,15 +118,22 @@ export async function GET(request: NextRequest) {
 /**
  * Send message content to AI for classification
  * Returns: label name or null
+ * Sends full email including subject, body, and attachment names in plain text
  */
-async function classifyMessageWithAI(subject: string, body: string): Promise<string | null> {
+async function classifyMessageWithAI(
+  subject: string,
+  body: string,
+  toEmails: any[],
+  fromEmail: any,
+  attachments: any[]
+): Promise<string | null> {
   try {
-    if (!NEBIUS_API_KEY) {
-      console.error('❌ NEBIUS_API_KEY not configured')
+    if (!DEEPSEEK_API_KEY) {
+      console.error('❌ DEEPSEEK_API_KEY not configured')
       return null
     }
 
-    console.log('🤖 Calling Nebius AI for classification...')
+    console.log('🤖 Calling DeepSeek AI for classification...')
 
     const systemPrompt = `You are an email-classification assistant.
 Your task is to read the email content and classify it into exactly one of the following labels:
@@ -127,28 +154,45 @@ If multiple labels could apply, choose the most specific one.
 Do not include extra fields.
 If unsure, choose the label that best fits the main intent.`
 
-    const userContent = `Subject: ${subject}
+    // Prepare email content - strip HTML and include metadata
+    const plainTextBody = stripHtmlTags(body)
+    const plainTextSubject = stripHtmlTags(subject)
+    
+    // Build attachment list (names only, no content)
+    const attachmentNames = attachments && attachments.length > 0
+      ? `\n\nAttachments: ${attachments.map((a: any) => a.filename).join(', ')}`
+      : ''
 
-${body}`
+    // Build recipient list
+    const toList = toEmails && toEmails.length > 0
+      ? toEmails.map((t: any) => t.email).join(', ')
+      : ''
 
-    console.log('📡 Sending request to Nebius API...')
+    // Build complete email content for AI
+    const fullEmailContent = `FROM: ${fromEmail?.email || 'unknown'}
+TO: ${toList}
+SUBJECT: ${plainTextSubject}
+
+${plainTextBody}${attachmentNames}`
+
+    console.log('📡 Sending request to DeepSeek API...')
 
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
 
-    const response = await fetch('https://api.tokenfactory.nebius.com/v1/chat/completions', {
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${NEBIUS_API_KEY}`,
+        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemma-2-2b-it',
-        max_tokens: 128,
+        model: MODEL,
+        max_tokens: 256,
         temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
+          { role: 'user', content: fullEmailContent },
         ],
       }),
       signal: controller.signal,
@@ -233,45 +277,61 @@ async function getEmailAccountId(grantId: string): Promise<{ id: string; userId:
 }
 
 /**
- * Find user ID by recipient email
+ * Find grant_id by recipient email
+ * Returns array of grant_ids (in case email is in multiple accounts)
  */
-async function getUserIdByRecipientEmail(toEmail: string): Promise<string | null> {
+async function getGrantIdsByRecipientEmails(toEmails: any[]): Promise<string[]> {
   try {
-    if (!supabaseAdmin) {
-      console.error('❌ Supabase admin client not available')
-      return null
+    if (!supabaseAdmin || !toEmails || toEmails.length === 0) {
+      return []
     }
 
-    console.log(`🔍 Looking for recipient email: ${toEmail}`)
+    console.log(`🔍 Looking for recipient grant IDs: ${toEmails.map((t: any) => t.email).join(', ')}`)
 
+    // Get all unique recipient emails
+    const recipientEmails = toEmails.map((t: any) => t.email).filter(Boolean)
+
+    if (recipientEmails.length === 0) {
+      console.warn('⚠️ No recipient emails found')
+      return []
+    }
+
+    // Query email_accounts for all matching emails
     const { data, error } = await supabaseAdmin!
       .from('email_accounts')
-      .select('user_id')
-      .eq('email', toEmail)
-      .single()
+      .select('grant_id, email')
+      .in('email', recipientEmails)
 
     if (error) {
-      console.warn(`⚠️ Recipient email not found: ${toEmail}`)
-      return null
+      console.warn(`⚠️ Error looking up recipient emails:`, error)
+      return []
     }
 
-    const userId = data?.user_id
-    console.log(`✅ Found recipient user ID: ${userId}`)
-    return userId || null
+    if (!data || data.length === 0) {
+      console.warn(`⚠️ No recipient accounts found for emails: ${recipientEmails.join(', ')}`)
+      return []
+    }
+
+    // Extract grant_ids
+    const grantIds = data.map((account: any) => account.grant_id).filter(Boolean)
+    console.log(`✅ Found recipient grant IDs: ${grantIds.join(', ')}`)
+    
+    return grantIds
   } catch (error) {
-    console.error('❌ Error finding recipient user:', error)
-    return null
+    console.error('❌ Error finding recipient grant IDs:', error)
+    return []
   }
 }
 
 /**
  * Save label to message_custom_labels table
+ * Can save with multiple applied_by grant_ids (for emails with multiple recipients)
  */
 async function labelMessage(
   emailAccountId: string,
-  userId: string,
   messageId: string,
   labelName: string,
+  appliedByGrantIds: string[],
   mailDetails: any
 ): Promise<boolean> {
   try {
@@ -287,7 +347,12 @@ async function labelMessage(
       return false
     }
 
-    console.log(`💾 Saving to database: accountId=${emailAccountId}, userId=${userId}, messageId=${messageId}, labelId=${labelId}`)
+    // If no grant_ids provided, log warning but continue
+    if (!appliedByGrantIds || appliedByGrantIds.length === 0) {
+      console.warn(`⚠️ No recipient grant_ids found, saving with empty applied_by array`)
+    }
+
+    console.log(`💾 Saving to database: accountId=${emailAccountId}, messageId=${messageId}, labelId=${labelId}, appliedBy=${JSON.stringify(appliedByGrantIds)}`)
 
     const { data, error } = await supabaseAdmin!
       .from('message_custom_labels')
@@ -295,7 +360,7 @@ async function labelMessage(
         email_account_id: emailAccountId,
         message_id: messageId,
         custom_label_id: labelId,
-        applied_by: userId,
+        applied_by: appliedByGrantIds, // Array of grant_ids
         applied_at: new Date().toISOString(),
         mail_details: mailDetails,
       })
@@ -358,27 +423,22 @@ async function handleMessageCreated(message: any): Promise<void> {
     
     console.log(`✅ Found sender account: ${accountInfo.id}, user: ${accountInfo.userId}`)
 
-    // Find recipient user ID from 'to' field
-    let recipientUserId = null
-    if (toEmails.length > 0) {
-      const firstRecipientEmail = toEmails[0].email
-      console.log(`🔍 Looking for recipient user with email: ${firstRecipientEmail}`)
-      recipientUserId = await getUserIdByRecipientEmail(firstRecipientEmail)
-    }
+    // Find recipient grant_ids from 'to' field
+    // This returns an array of grant_ids for all recipient email accounts
+    console.log(`🔍 Looking for recipient grant IDs from ${toEmails.length} recipients`)
+    const recipientGrantIds = await getGrantIdsByRecipientEmails(toEmails)
 
-    // Use recipient user ID if found, otherwise use sender's user ID
-    const appliedByUserId = recipientUserId || accountInfo.userId
-    console.log(`💾 Will save applied_by as: ${appliedByUserId} (recipient: ${recipientUserId}, sender: ${accountInfo.userId})`)
+    console.log(`💾 Will save applied_by with ${recipientGrantIds.length} recipient grant_ids: ${recipientGrantIds.join(', ')}`)
 
-    // Extract text from body
-    const emailBody = body || ''
-
-    // Truncate for AI to avoid token limits
-    const truncatedBody = emailBody.substring(0, 2000)
-
-    // Classify with AI
+    // Classify with AI - send full email content
     console.log('🤖 Starting AI classification...')
-    const labelName = await classifyMessageWithAI(subject || '', truncatedBody)
+    const labelName = await classifyMessageWithAI(
+      subject || '',
+      body || '',
+      toEmails,
+      msg.from,
+      msg.attachments || []
+    )
 
     if (!labelName) {
       console.warn(`⚠️ Could not classify message: ${messageId}`)
@@ -403,13 +463,13 @@ async function handleMessageCreated(message: any): Promise<void> {
       grant_id: msg.grant_id,
     }
 
-    // Save label to database
+    // Save label to database with recipient grant_ids array
     console.log(`💾 Saving label: ${labelName}`)
     const success = await labelMessage(
       accountInfo.id,
-      appliedByUserId,
       messageId,
       labelName,
+      recipientGrantIds,
       mailDetails
     )
 

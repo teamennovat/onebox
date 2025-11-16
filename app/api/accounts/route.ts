@@ -4,12 +4,31 @@ import { supabaseAdmin } from '@/lib/supabase'
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const userId = searchParams.get('userId')
+  const grantId = searchParams.get('grantId')
 
-  if (!userId) {
-    return NextResponse.json({ error: 'User ID is required' }, { status: 400 })
+  if (!supabaseAdmin) {
+    return NextResponse.json({ error: 'Server not configured' }, { status: 500 })
   }
 
   try {
+    // Query by grantId
+    if (grantId) {
+      const { data: account, error } = await supabaseAdmin
+        .from('email_accounts')
+        .select('id, grant_id, email, provider, grant_status, is_primary, settings, connected_at, last_sync')
+        .eq('grant_id', grantId)
+        .single()
+
+      if (error) throw error
+
+      return NextResponse.json({ account })
+    }
+
+    // Query by userId
+    if (!userId) {
+      return NextResponse.json({ error: 'User ID or Grant ID is required' }, { status: 400 })
+    }
+
     // First try: email_accounts where user_id matches the provided userId
     let { data: accounts, error } = await supabaseAdmin
       .from('email_accounts')

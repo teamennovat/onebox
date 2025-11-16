@@ -8,6 +8,7 @@ import { supabaseAdmin } from '@/lib/supabase'
  * Query params:
  * - labelId: UUID of the custom label
  * - emailAccountId: UUID of the email account
+ * - grantId: (optional) Nylas grant ID to filter labeled emails by account visibility (applied_by)
  * - limit: number of messages to fetch (default 50)
  * - offset: pagination offset (default 0)
  */
@@ -16,6 +17,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url)
     const labelId = searchParams.get('labelId')
     const emailAccountId = searchParams.get('emailAccountId')
+    const grantId = searchParams.get('grantId')
     const limit = parseInt(searchParams.get('limit') || '50')
     const offset = parseInt(searchParams.get('offset') || '0')
 
@@ -42,6 +44,7 @@ export async function GET(request: NextRequest) {
         message_id,
         custom_label_id,
         applied_at,
+        applied_by,
         mail_details,
         custom_labels!inner(id, name, color)
       `
@@ -59,8 +62,22 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    // Filter by applied_by if grantId is provided
+    // applied_by is a TEXT[] array of grant_id strings
+    const filteredData = grantId
+      ? data.filter((item: any) => {
+          const appliedBy = item.applied_by
+          if (Array.isArray(appliedBy)) {
+            return appliedBy.includes(grantId)
+          } else if (typeof appliedBy === 'string') {
+            return appliedBy === grantId
+          }
+          return false
+        })
+      : data
+
     // Transform data to match Mail interface
-    const mails = data.map((item: any) => ({
+    const mails = filteredData.map((item: any) => ({
       id: item.message_id,
       name: item.mail_details?.from?.[0]?.name || item.mail_details?.from?.[0]?.email || 'Unknown',
       email: item.mail_details?.from?.[0]?.email || '',
@@ -77,7 +94,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       data: mails,
-      count: data.length,
+      count: filteredData.length,
     })
   } catch (error) {
     console.error('Error in GET /api/messages/by-label:', error)

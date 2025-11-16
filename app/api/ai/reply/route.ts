@@ -1,19 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const NEBIUS_API_KEY = process.env.NEBIUS_API_KEY
-const NEBIUS_BASE_URL = 'https://api.tokenfactory.nebius.com/v1'
-const MODEL = 'google/gemma-2-9b-it-fast'
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
+const MODEL = 'deepseek-chat'  // DeepSeek-V3.2-Exp (non-thinking mode)
 
 // Debug logging
 if (process.env.NODE_ENV !== 'production') {
   console.log('AI Reply Route Initialized:', {
-    hasApiKey: !!NEBIUS_API_KEY,
-    apiKeyLength: NEBIUS_API_KEY?.length || 0,
-    baseUrl: NEBIUS_BASE_URL,
+    hasApiKey: !!DEEPSEEK_API_KEY,
+    apiKeyLength: DEEPSEEK_API_KEY?.length || 0,
+    baseUrl: DEEPSEEK_BASE_URL,
     model: MODEL
   })
 }
-
 const SYSTEM_PROMPT = `You are OneBox AI, an elite email-writing assistant. You generate flawless, ready-to-send email replies that require zero editing.
 
 ABSOLUTE RULES - NO EXCEPTIONS
@@ -181,58 +180,50 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (!NEBIUS_API_KEY) {
-      console.error('NEBIUS_API_KEY is not set in environment variables')
+    if (!DEEPSEEK_API_KEY) {
+      console.error('DEEPSEEK_API_KEY is not set in environment variables')
       return NextResponse.json(
-        { error: 'NEBIUS_API_KEY not configured' },
+        { error: 'DEEPSEEK_API_KEY not configured' },
         { status: 500 }
       )
     }
 
-    console.log('AI reply: Calling Nebius API with model:', MODEL)
+    console.log('AI reply: Calling DeepSeek API with model:', MODEL)
 
-    // Build the user message with email context
+    // Build the user message including email context
     let userMessage = prompt
     if (emailContext) {
       userMessage = `Original email:\n${emailContext}\n\nReply prompt:\n${prompt}`
     }
 
-    const response = await fetch(`${NEBIUS_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${NEBIUS_API_KEY}`,
+        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         model: MODEL,
         messages: [
-          {
-            role: 'system',
-            content: SYSTEM_PROMPT,
-          },
-          {
-            role: 'user',
-            content: userMessage,
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userMessage },
         ],
         stream: true,
-        temperature: 0.9,
+        temperature: 0.3, // recommended for reliable structured email replies
         top_p: 0.9,
-        top_k: 50,
         max_tokens: 512,
       }),
     })
 
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('Nebius API error:', {
+      console.error('DeepSeek API error:', {
         status: response.status,
         statusText: response.statusText,
         body: errorText,
-        apiUrl: `${NEBIUS_BASE_URL}/chat/completions`
       })
       return NextResponse.json(
-        { 
+        {
           error: 'Failed to generate reply from AI',
           details: {
             status: response.status,
@@ -243,11 +234,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Stream the response back to the client
     const stream = response.body
     if (!stream) {
       return NextResponse.json(
-        { error: 'No response stream from Nebius' },
+        { error: 'No response stream from DeepSeek' },
         { status: 500 }
       )
     }

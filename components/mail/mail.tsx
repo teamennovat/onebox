@@ -45,6 +45,8 @@ import { NoAccountMessage } from "./no-account-message"
 import { type Mail } from "./use-mail"
 import { useMail } from "./use-mail"
 import { FilterSheet, type EmailFilters } from "./filter-sheet"
+import { LabeledEmailsView } from "./labeled-emails-view"
+import { CustomLabels } from "./custom-labels"
 
 interface MailProps {
   accounts: {
@@ -85,6 +87,8 @@ export function Mail({
   const [forwardEmail, setForwardEmail] = React.useState<{ subject: string; body: string; attachments: Array<{ filename: string; content_type: string; size: number; id: string }> } | null>(null)
   const [draftToEdit, setDraftToEdit] = React.useState<any | null>(null)
   const [isComposeOpen, setIsComposeOpen] = React.useState(false)
+  const [showLabeledEmails, setShowLabeledEmails] = React.useState(false)
+  const [currentEmailAccountId, setCurrentEmailAccountId] = React.useState<string>('')
   
   // Prevent duplicate folder change requests
   const lastFolderChangeRef = React.useRef<{ grantId: string; folder: string } | null>(null)
@@ -582,6 +586,21 @@ export function Mail({
 
   const handleAccountChange = React.useCallback((grantId: string) => {
     setCurrentGrantId(grantId)
+    
+    // Fetch the email account ID from Supabase based on grant_id
+    const fetchAccountId = async () => {
+      try {
+        const response = await fetch(`/api/accounts?grantId=${grantId}`)
+        const data = await response.json()
+        if (data.account && data.account.id) {
+          setCurrentEmailAccountId(data.account.id)
+        }
+      } catch (error) {
+        console.error('Error fetching account ID:', error)
+      }
+    }
+    
+    fetchAccountId()
   }, [])
 
   // Fallback static links when provider folders aren't available yet
@@ -763,206 +782,151 @@ export function Mail({
               }}
             />
             <Separator />
-            {/* Labels / custom folders (non-system) */}
-            {
-              (() => {
-                // Decide which labels to show in the Labels section
-                if (!currentGrantId) {
-                  // show only our default custom labels (counts 0)
-                  return (
-                    <div className="px-2">
-                      <div className="text-xs font-medium mb-2">Labels</div>
-                      <Nav
-                        isCollapsed={isCollapsed}
-                        loading={sidebarLoading}
-                        links={defaultCustomLabels}
-                        onMailboxTypeChange={(folderId) => {
-                          const folderToUse = folderId || 'INBOX'
-                          // Prevent duplicate requests
-                          if (lastFolderChangeRef.current?.grantId === currentGrantId && lastFolderChangeRef.current?.folder === folderToUse) {
-                            return
-                          }
-                          lastFolderChangeRef.current = { grantId: currentGrantId!, folder: folderToUse }
-                          setMailboxType(folderToUse)
-                          setFilters({}) // Reset filters
-                          setSearchText('') // Reset search
-                          if (currentGrantId && folderId) {
-                            setFetchedNextCursor(null)
-                            setFetchedHasMore(true)
-                            fetchEmails(currentGrantId as string, folderToUse)
-                          }
-                        }}
-                      />
-                    </div>
-                  )
-                }
-
-                // Account selected: merge our default custom labels (with provider counts if available)
-                const customLabelObjects = defaultCustomLabelTitles.map((t) => {
-                  const found = labelLinksFromFolders.find((l: any) => String(l.title).toLowerCase() === t.toLowerCase())
-                  return found ? { ...found, icon: Tag } : { title: t, label: '0', icon: Tag, variant: 'ghost' as const }
-                })
-
-                const remainingLabels = labelLinksFromFolders.filter((l: any) => !defaultCustomLabelTitles.some((t) => String(l.title).toLowerCase() === t.toLowerCase()))
-
-                const labelsToShow = [...customLabelObjects, ...remainingLabels]
-
-                if (labelsToShow.length === 0) return null
-
-                return (
-                  <div className="px-2">
-                    <div className="text-xs font-medium mb-2">Labels</div>
-                      <Nav
-                        isCollapsed={isCollapsed}
-                        loading={sidebarLoading}
-                        links={labelsToShow.map((l: any) => ({ ...l, icon: Tag }))}
-                        onMailboxTypeChange={(folderId) => {
-                          const folderToUse = folderId || 'INBOX'
-                          // Prevent duplicate requests
-                          if (lastFolderChangeRef.current?.grantId === currentGrantId && lastFolderChangeRef.current?.folder === folderToUse) {
-                            return
-                          }
-                          lastFolderChangeRef.current = { grantId: currentGrantId!, folder: folderToUse }
-                          setMailboxType(folderToUse)
-                          setFilters({}) // Reset filters
-                          setSearchText('') // Reset search
-                          if (currentGrantId && folderId) {
-                            setFetchedNextCursor(null)
-                            setFetchedHasMore(true)
-                            fetchEmails(currentGrantId as string, folderToUse)
-                          }
-                        }}
-                      />
-                  </div>
-                )
-              })()
-            }
+            {/* Labels / Custom Supabase Labels Only (No Nylas) */}
+            {currentGrantId && currentEmailAccountId && (
+              <div className="px-3 py-2">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Labels</h3>
+                <CustomLabels 
+                  emailAccountId={currentEmailAccountId}
+                  onLabelSelect={(labelId, labelName, emails) => {
+                    setShowLabeledEmails(true)
+                  }}
+                />
+              </div>
+            )}
             </div>
           </ScrollArea>
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize={defaultLayout[1]} minSize={30}>
-          <Tabs defaultValue="all" onValueChange={(v) => setActiveTab(v)}>
-            <div className="flex items-center px-4 py-2">
-              <h1 className="text-xl font-bold">Inbox</h1>
-              <TabsList className="ml-auto">
-                <TabsTrigger
-                  value="all"
-                  className="text-zinc-600 dark:text-zinc-200"
-                >
-                  All mail
-                </TabsTrigger>
-                <TabsTrigger
-                  value="unread"
-                  className="text-zinc-600 dark:text-zinc-200"
-                >
-                  Unread
-                </TabsTrigger>
-              </TabsList>
-            </div>
-            <Separator />
-            <div className="bg-background/95 p-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-              <div className="relative">
-                <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input 
-                  placeholder="Search emails..." 
-                  className="pl-8 pr-20"
-                  value={searchText}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      handleSearchSubmit()
-                    }
-                  }}
-                />
-                <div className="absolute right-2 top-2.5 flex items-center gap-1">
-                  {searchText && (
+          {showLabeledEmails && currentGrantId && currentEmailAccountId ? (
+            <LabeledEmailsView 
+              emailAccountId={currentEmailAccountId}
+              grantId={currentGrantId}
+            />
+          ) : (
+            <Tabs defaultValue="all" onValueChange={(v) => setActiveTab(v)}>
+              <div className="flex items-center px-4 py-2">
+                <h1 className="text-xl font-bold">Inbox</h1>
+                <TabsList className="ml-auto">
+                  <TabsTrigger
+                    value="all"
+                    className="text-zinc-600 dark:text-zinc-200"
+                  >
+                    All mail
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="unread"
+                    className="text-zinc-600 dark:text-zinc-200"
+                  >
+                    Unread
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+              <Separator />
+              <div className="bg-background/95 p-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                <div className="relative">
+                  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input 
+                    placeholder="Search emails..." 
+                    className="pl-8 pr-20"
+                    value={searchText}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleSearchSubmit()
+                      }
+                    }}
+                  />
+                  <div className="absolute right-2 top-2.5 flex items-center gap-1">
+                    {searchText && (
+                      <button 
+                        type="button" 
+                        onClick={handleSearchClear}
+                        className="p-1 rounded hover:bg-accent/30 text-muted-foreground hover:text-foreground transition-colors"
+                        title="Clear search"
+                      >
+                        <X className="h-4 w-4" />
+                        <span className="sr-only">Clear search</span>
+                      </button>
+                    )}
                     <button 
                       type="button" 
-                      onClick={handleSearchClear}
-                      className="p-1 rounded hover:bg-accent/30 text-muted-foreground hover:text-foreground transition-colors"
-                      title="Clear search"
+                      onClick={handleSearchSubmit}
+                      disabled={!searchText}
+                      className="p-1 rounded hover:bg-accent/30 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Search"
                     >
-                      <X className="h-4 w-4" />
-                      <span className="sr-only">Clear search</span>
+                      <Search className="h-4 w-4" />
+                      <span className="sr-only">Search</span>
                     </button>
-                  )}
-                  <button 
-                    type="button" 
-                    onClick={handleSearchSubmit}
-                    disabled={!searchText}
-                    className="p-1 rounded hover:bg-accent/30 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Search"
-                  >
-                    <Search className="h-4 w-4" />
-                    <span className="sr-only">Search</span>
-                  </button>
-                  <button type="button" onClick={() => setIsFilterOpen(true)} className="p-1 rounded hover:bg-accent/30">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M3 4h18M6 12h12M10 20h4"/></svg>
-                    <span className="sr-only">Open filters</span>
-                  </button>
+                    <button type="button" onClick={() => setIsFilterOpen(true)} className="p-1 rounded hover:bg-accent/30">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M3 4h18M6 12h12M10 20h4"/></svg>
+                      <span className="sr-only">Open filters</span>
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-            <TabsContent value="all" className="m-0">
-              {!currentGrantId ? (
-                <NoAccountMessage />
-              ) : loading ? (
-                <MailListSkeleton />
-              ) : (
-                <>
-                  {console.log('🎯 RENDERING MAILLIST WITH:', { mailCount: fetchedMails.length, loading })}
+              <TabsContent value="all" className="m-0">
+                {!currentGrantId ? (
+                  <NoAccountMessage />
+                ) : loading ? (
+                  <MailListSkeleton />
+                ) : (
+                  <>
+                    {console.log('🎯 RENDERING MAILLIST WITH:', { mailCount: fetchedMails.length, loading })}
+                    <MailList 
+                      items={fetchedMails} 
+                      selectedGrantId={currentGrantId} 
+                      mailboxType={mailboxType} 
+                      isUnreadTab={activeTab === 'unread'} 
+                      dateFilterFrom={dateFilterFrom}
+                      dateFilterTo={dateFilterTo}
+                        filters={filters}
+                      onDateFilterChange={(from, to) => {
+                        setDateFilterFrom(from)
+                        setDateFilterTo(to)
+                      }}
+                      setItems={setFetchedMails} 
+                      onFolderChange={handleFolderChange}
+                      initialNextCursor={fetchedNextCursor} 
+                      initialHasMore={fetchedHasMore}
+                      onPaginate={async (cursor) => {
+                        // Pagination requested - fetch next page with same filters/search
+                        if (currentGrantId && mailboxType) {
+                          await fetchEmails(currentGrantId, mailboxType, filters, cursor)
+                        }
+                      }}
+                      onDraftClick={(draft) => {
+                        setDraftToEdit(draft)
+                        setIsComposeOpen(true)
+                      }}
+                    />
+                  </>
+                )}
+              </TabsContent>
+              <TabsContent value="unread" className="m-0">
+                {loading ? (
+                  <MailListSkeleton />
+                ) : (
                   <MailList 
-                    items={fetchedMails} 
-                    selectedGrantId={currentGrantId} 
-                    mailboxType={mailboxType} 
-                    isUnreadTab={activeTab === 'unread'} 
-                    dateFilterFrom={dateFilterFrom}
-                    dateFilterTo={dateFilterTo}
-                      filters={filters}
-                    onDateFilterChange={(from, to) => {
-                      setDateFilterFrom(from)
-                      setDateFilterTo(to)
-                    }}
-                    setItems={setFetchedMails} 
+                    items={(currentGrantId ? fetchedMails : (mails ?? [])).filter((item: Mail) => !item.read)} 
+                    selectedGrantId={currentGrantId}
+                    mailboxType={mailboxType}
+                    isUnreadTab={activeTab === 'unread'}
+                    setItems={setFetchedMails}
                     onFolderChange={handleFolderChange}
                     initialNextCursor={fetchedNextCursor} 
                     initialHasMore={fetchedHasMore}
-                    onPaginate={async (cursor) => {
-                      // Pagination requested - fetch next page with same filters/search
-                      if (currentGrantId && mailboxType) {
-                        await fetchEmails(currentGrantId, mailboxType, filters, cursor)
-                      }
-                    }}
                     onDraftClick={(draft) => {
                       setDraftToEdit(draft)
                       setIsComposeOpen(true)
                     }}
                   />
-                </>
-              )}
-            </TabsContent>
-            <TabsContent value="unread" className="m-0">
-              {loading ? (
-                <MailListSkeleton />
-              ) : (
-                <MailList 
-                  items={(currentGrantId ? fetchedMails : (mails ?? [])).filter((item: Mail) => !item.read)} 
-                  selectedGrantId={currentGrantId}
-                  mailboxType={mailboxType}
-                  isUnreadTab={activeTab === 'unread'}
-                  setItems={setFetchedMails}
-                  onFolderChange={handleFolderChange}
-                  initialNextCursor={fetchedNextCursor} 
-                  initialHasMore={fetchedHasMore}
-                  onDraftClick={(draft) => {
-                    setDraftToEdit(draft)
-                    setIsComposeOpen(true)
-                  }}
-                />
-              )}
-            </TabsContent>
-          </Tabs>
+                )}
+              </TabsContent>
+            </Tabs>
+          )}
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize={defaultLayout[2]} minSize={30}>

@@ -80,7 +80,9 @@ CREATE TABLE message_custom_labels (
   email_account_id UUID REFERENCES email_accounts(id) ON DELETE CASCADE,
   message_id TEXT NOT NULL,
   custom_label_id UUID REFERENCES custom_labels(id) ON DELETE CASCADE,
-  applied_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  -- Store grant_id(s) of the recipient account(s) that the label was applied for.
+  -- Use TEXT[] to allow multiple grant_ids for multi-recipient messages.
+  applied_by TEXT[] DEFAULT ARRAY[]::text[],
   applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(email_account_id, message_id, custom_label_id)
 );

@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Mail } from "./use-mail"
 import { useMail } from "./use-mail"
+import { SummaryListIcon } from "./summary-list-icon"
 import {
   Avatar,
   AvatarFallback,
@@ -118,6 +119,8 @@ export function MailListItem({
         >
           <Star className={cn("h-4 w-4", item.labels?.map(String).join(' ').toLowerCase().includes('star') && "fill-yellow-400 text-yellow-400")} />
         </Button>
+
+        <SummaryListIcon email={item} />
 
         <div className="relative">
           <Popover>
