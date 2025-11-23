@@ -94,6 +94,17 @@ export function AccountSwitcher({
           ]
         : []),
       ...accounts,
+      // All Accounts option (only if multiple accounts)
+      ...(accounts.length > 1 ? [
+        {
+          label: "All Accounts",
+          email: "",
+          grantId: "__all_accounts__",
+          icon: (
+            <div className="h-6 w-6 rounded-full bg-blue-500 flex items-center justify-center text-xs text-white font-bold">A</div>
+          ),
+        },
+      ] : []),
       // Connect new account option appended to the end
       {
         label: "Connect New Account",

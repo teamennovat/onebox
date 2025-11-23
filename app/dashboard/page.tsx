@@ -210,7 +210,7 @@ function DashboardContent() {
   }
 
   return (
-    <div className="container mx-auto p-4">
+    <div className="container-fluid mx-auto overflow-hidden">
       {/* Success message */}
       {searchParams.get('success') === 'account_connected' && (
         <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4">
@@ -227,7 +227,7 @@ function DashboardContent() {
 
       {/* Account selection */}
       {/* Mail UI using existing accounts/messages data */}
-      <div className="mb-8">
+      <div className="mb-4">
         <MailWrapper accounts={accounts} mails={messages} />
       </div>
 

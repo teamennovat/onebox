@@ -25,7 +25,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <BodyWrapper className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <BodyWrapper className={`${geistSans.variable} ${geistMono.variable} antialiased  overflow-hidden`}>
         {children}
       </BodyWrapper>
     </html>

@@ -22,14 +22,17 @@ export function LabeledMailList({
   mails,
   isLoading,
   selectedMailId,
-  onMailSelect,
+  onMailSelectAction,
+  onLabelChangeAction,
 }: {
   mails: LabeledEmail[]
   isLoading?: boolean
   selectedMailId?: string
-  onMailSelect?: (mail: LabeledEmail) => void
+  onMailSelectAction?: (mail: LabeledEmail) => void
+  onLabelChangeAction?: (messageId: string, oldLabelId: string, newLabelId: string) => void
 }) {
-  const [, setMail] = useMail()
+  const [mail, setMail] = useMail()
+  
   const sortedMails = useMemo(() => {
     return [...mails].sort((a, b) => {
       return new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -38,9 +41,9 @@ export function LabeledMailList({
 
   if (isLoading) {
     return (
-      <div className="space-y-2">
+      <div className="space-y-2 p-2">
         {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="h-16 bg-gray-200 rounded animate-pulse" />
+          <div key={i} className="h-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
         ))}
       </div>
     )
@@ -54,65 +57,41 @@ export function LabeledMailList({
     )
   }
 
-  const handleMailClick = (labeledMail: LabeledEmail) => {
-    // Convert labeled email to Mail format for display
-    const mailItem: Mail = {
-      id: labeledMail.id,
-      name: labeledMail.name,
-      email: labeledMail.email,
-      subject: labeledMail.subject,
-      text: labeledMail.text,
-      html: labeledMail.mailDetails?.html || undefined,
-      body: labeledMail.mailDetails?.body || labeledMail.text,
-      date: labeledMail.date,
-      read: labeledMail.read,
-      labels: labeledMail.labels,
-      thread_id: labeledMail.mailDetails?.thread_id,
-      grant_id: labeledMail.grantId,
-      from: labeledMail.mailDetails?.from,
-      to: labeledMail.mailDetails?.to,
-      cc: labeledMail.mailDetails?.cc,
-      bcc: labeledMail.mailDetails?.bcc,
-      reply_to: labeledMail.mailDetails?.reply_to,
-      attachments: labeledMail.mailDetails?.attachments,
-    }
-    
-    // Update global mail state
-    setMail({ selected: labeledMail.id })
-    
-    // Callback to parent
-    onMailSelect?.(labeledMail)
-  }
-
   return (
-    <div className="space-y-1">
-      {sortedMails.map((mail) => {
+    <div className="divide-y divide-gray-200 dark:divide-gray-800">
+      {sortedMails.map((labeledMail) => {
+        // Convert labeled email to Mail format for MailListItem
         const mailItem: Mail = {
-          id: mail.id,
-          name: mail.name,
-          email: mail.email,
-          subject: mail.subject,
-          text: mail.text,
-          html: mail.mailDetails?.html || undefined,
-          body: mail.mailDetails?.body || mail.text,
-          date: mail.date,
-          read: mail.read,
-          labels: mail.labels,
-          thread_id: mail.mailDetails?.thread_id,
-          grant_id: mail.grantId,
-          from: mail.mailDetails?.from,
-          to: mail.mailDetails?.to,
-          cc: mail.mailDetails?.cc,
-          bcc: mail.mailDetails?.bcc,
-          reply_to: mail.mailDetails?.reply_to,
-          attachments: mail.mailDetails?.attachments,
+          id: labeledMail.id,
+          name: labeledMail.name,
+          email: labeledMail.email,
+          subject: labeledMail.subject,
+          text: labeledMail.text,
+          html: labeledMail.mailDetails?.html || undefined,
+          body: labeledMail.mailDetails?.body || labeledMail.text,
+          date: labeledMail.date,
+          read: labeledMail.read,
+          labels: labeledMail.labels,
+          thread_id: labeledMail.mailDetails?.thread_id,
+          grant_id: labeledMail.grantId,
+          from: labeledMail.mailDetails?.from,
+          to: labeledMail.mailDetails?.to,
+          cc: labeledMail.mailDetails?.cc,
+          bcc: labeledMail.mailDetails?.bcc,
+          reply_to: labeledMail.mailDetails?.reply_to,
+          attachments: labeledMail.mailDetails?.attachments,
         }
 
         return (
           <div
-            key={mail.id}
-            onClick={() => handleMailClick(mail)}
-            className="cursor-pointer"
+            key={labeledMail.id}
+            onClick={() => {
+              // Update global mail state
+              setMail({ selected: labeledMail.id })
+              // Callback to parent to show detail view
+              onMailSelectAction?.(labeledMail)
+            }}
+            className="cursor-pointer hover:bg-accent/5 transition-colors"
           >
             <MailListItem
               item={mailItem}

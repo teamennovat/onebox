@@ -60,6 +60,12 @@ export async function PUT(
     let sessionUserId: string | null = null
 
     if (grantFromQuery) {
+      // Validate it's not __all_accounts__
+      if (grantFromQuery === '__all_accounts__') {
+        return NextResponse.json({ 
+          error: 'A specific Grant ID is required (cannot use __all_accounts__)' 
+        }, { status: 400 })
+      }
       grantId = grantFromQuery
       console.log('read route: using grantId from query param (no session validation)')
     } else {

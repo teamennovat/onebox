@@ -45,8 +45,11 @@ import { NoAccountMessage } from "./no-account-message"
 import { type Mail } from "./use-mail"
 import { useMail } from "./use-mail"
 import { FilterSheet, type EmailFilters } from "./filter-sheet"
-import { LabeledEmailsView } from "./labeled-emails-view"
 import { CustomLabels } from "./custom-labels"
+import { MailHeader } from "./mail-header"
+import { MailSearchBar } from "./mail-search-bar"
+import { MailListSection } from "./mail-list-section"
+import { createBrowserClient } from "@supabase/ssr"
 
 interface MailProps {
   accounts: {
@@ -64,11 +67,12 @@ interface MailProps {
 export function Mail({
   accounts,
   mails,
-  defaultLayout = [20, 32, 48],
+  defaultLayout = [18, 30, 52],
   defaultCollapsed = false,
   navCollapsedSize,
 }: MailProps) {
   const [isCollapsed, setIsCollapsed] = React.useState(defaultCollapsed)
+  const [screenSize, setScreenSize] = React.useState<'mobile' | 'tablet' | 'desktop' | 'large'>('desktop')
   const [mail] = useMail()
   const [fetchedMails, setFetchedMails] = React.useState<Mail[]>([])
   const [loading, setLoading] = React.useState(false)
@@ -89,8 +93,55 @@ export function Mail({
   const [isComposeOpen, setIsComposeOpen] = React.useState(false)
   const [showLabeledEmails, setShowLabeledEmails] = React.useState(false)
   const [currentEmailAccountId, setCurrentEmailAccountId] = React.useState<string>('')
+  const [selectedLabelData, setSelectedLabelData] = React.useState<{ labelId: string; labelName: string; labelColor: string; emails: any[] } | null>(null)
+  const [labelLoadingId, setLabelLoadingId] = React.useState<string | null>(null)
+  const [labelCountRefreshTrigger, setLabelCountRefreshTrigger] = React.useState(0)
+  const [isEmailDetailOpen, setIsEmailDetailOpen] = React.useState(false)
+  const [selectedEmailForSheet, setSelectedEmailForSheet] = React.useState<Mail | null>(null)
+  const [currentBatch, setCurrentBatch] = React.useState(0)
+  const [isPreloadingNextBatch, setIsPreloadingNextBatch] = React.useState(false)
+  // State for all-accounts pagination
+  const [allAccountsPage, setAllAccountsPage] = React.useState(0)
   
-  // Prevent duplicate folder change requests
+  // Track screen size for responsive layout
+  React.useEffect(() => {
+    const handleResize = () => {
+      const width = window.innerWidth
+      if (width <= 425) {
+        setScreenSize('mobile')
+      } else if (width <= 764) {
+        setScreenSize('tablet')
+      } else if (width <= 1024) {
+        setScreenSize('tablet')
+      } else if (width >= 2560) {
+        setScreenSize('large')
+      } else {
+        setScreenSize('desktop')
+      }
+    }
+    
+    handleResize()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+  
+  // Determine responsive layout
+  const getResponsiveLayout = () => {
+    switch (screenSize) {
+      case 'large': // 2560px+
+        return [10, 20, 70]
+      case 'desktop': // 1024px - 2560px
+        return [18, 30, 52]
+      case 'tablet': // 425px - 1024px
+        return [20, 80, 0] // Left sidebar visible but narrow, middle takes most, right hidden
+      case 'mobile': // < 425px
+        return [5, 95, 0] // Left completely hidden (drawer only), middle takes all, right hidden
+      default:
+        return [18, 30, 52]
+    }
+  }
+  
+  const responsiveLayout = getResponsiveLayout()
   const lastFolderChangeRef = React.useRef<{ grantId: string; folder: string } | null>(null)
   // Track current search query to detect search changes
   const currentSearchRef = React.useRef<string>('')
@@ -142,18 +193,329 @@ export function Mail({
     }
     
     if (currentGrantId && mailboxType) {
-      console.log('🔎 SEARCH SUBMITTED:', { searchText, searchQuery: searchText })
+      console.log('🔎 SEARCH SUBMITTED:', { searchText, grantId: currentGrantId, isAllAccounts: currentGrantId === '__all_accounts__' })
       currentSearchRef.current = searchText
       setFetchedNextCursor(null)
       setFetchedHasMore(true)
+      setAllAccountsPage(0) // Reset page for new search
+      
       // Create temporary filters with ONLY search_query_native
       // This overrides all other filters per Nylas API constraint
       const searchOnlyFilters: EmailFilters = {
         search_query_native: searchText
       }
-      fetchEmails(currentGrantId, mailboxType, searchOnlyFilters)
+      
+      // For all-accounts mode, use the search endpoint; otherwise use fetchEmails
+      if (currentGrantId === '__all_accounts__') {
+        performAllAccountsSearch(searchOnlyFilters, 0)
+      } else {
+        fetchEmails(currentGrantId, mailboxType, searchOnlyFilters)
+      }
     }
   }, [currentGrantId, mailboxType, searchText, filters])
+
+  // All-accounts search function
+  const performAllAccountsSearch = React.useCallback(async (filterObj: EmailFilters, page: number = 0) => {
+    try {
+      setLoading(true)
+
+      const supabase = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+      
+      if (sessionError || !session?.user?.id) {
+        console.error('Failed to get auth session:', sessionError)
+        setLoading(false)
+        throw new Error('Not authenticated')
+      }
+
+      const params = new URLSearchParams()
+      params.set('userId', session.user.id)
+      params.set('searchQuery', filterObj.search_query_native || '')
+      params.set('filters', JSON.stringify(filterObj))
+      params.set('page', String(page))
+
+      const response = await fetch(`/api/accounts/search?${params.toString()}`)
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '<no body>')
+        console.error('Failed to search all accounts:', {
+          status: response.status,
+          body: bodyText,
+        })
+        throw new Error(`Failed to search emails: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const emails = data.data || []
+
+      // Transform emails to Mail format
+      function stripHtml(input: string) {
+        if (!input) return ""
+        return input
+          .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+      }
+
+      const transformedMails = emails.map((msg: any) => ({
+        id: msg.id,
+        name: msg.from?.[0]?.name || msg.from?.[0]?.email || 'Unknown',
+        email: msg.from?.[0]?.email || '',
+        subject: msg.subject || '(No subject)',
+        text: msg.html || msg.body || stripHtml(msg.body) || msg.snippet || '',
+        html: msg.html || msg.body || undefined,
+        thread_id: msg.thread_id || undefined,
+        reply_to_message_id: msg.reply_to_message_id || undefined,
+        attachments: msg.attachments || [],
+        date: new Date(msg.date * 1000).toISOString(),
+        read: !msg.unread,
+        labels: msg.folders || ['inbox'],
+        accountEmail: msg.accountEmail,
+        accountProvider: msg.accountProvider,
+        emailAccountId: msg.emailAccountId,
+        grantId: msg.grantId,
+      }))
+
+      console.log('📨 All-Accounts Search Results:', {
+        searchQuery: filterObj.search_query_native,
+        totalFound: data.metadata?.totalCount,
+        pageCount: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+      })
+
+      if (page === 0) {
+        setFetchedMails(transformedMails)
+      } else {
+        setFetchedMails(prev => [...prev, ...transformedMails])
+      }
+
+      setFetchedHasMore(data.metadata?.hasMore || false)
+      setLoading(false)
+    } catch (error) {
+      console.error('Error searching all accounts:', error)
+      setLoading(false)
+      throw error
+    }
+  }, [])
+
+  // REMOVED: prefetchMultiplePages function
+  // Reason: Caused excessive looping (pages 0,1,2,3 fetched immediately)
+  // NEW APPROACH: Only fetch page 0 on load, then page 1 at 50% threshold
+  // This is now handled by mail-list.tsx checkAndPrefetch()
+
+  // Fetch emails from all connected accounts with smart proportional distribution
+  const fetchAllAccountsEmails = React.useCallback(async (page: number = 0, batchIndex: number = 0, isLoadMore: boolean = false) => {
+    try {
+      if (!isLoadMore) {
+        setLoading(true)
+      }
+
+      // Get current auth user to pass userId
+      const supabase = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+      
+      if (sessionError || !session?.user?.id) {
+        console.error('Failed to get auth session:', sessionError)
+        setLoading(false)
+        throw new Error('Not authenticated')
+      }
+
+      const params = new URLSearchParams()
+      params.set('userId', session.user.id)
+      params.set('page', String(page))
+      params.set('batchIndex', String(batchIndex))
+
+      const response = await fetch(`/api/accounts/all-emails?${params.toString()}`)
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '<no body>')
+        console.error('Failed to fetch all accounts emails:', {
+          status: response.status,
+          body: bodyText,
+        })
+        throw new Error(`Failed to fetch emails: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const emails = data.data || []
+
+      // Transform emails to Mail format
+      function stripHtml(input: string) {
+        if (!input) return ""
+        return input
+          .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+      }
+
+      const transformedMails = emails.map((msg: any) => ({
+        id: msg.id,
+        name: msg.from?.[0]?.name || msg.from?.[0]?.email || 'Unknown',
+        email: msg.from?.[0]?.email || '',
+        subject: msg.subject || '(No subject)',
+        text: msg.html || msg.body || stripHtml(msg.body) || msg.snippet || '',
+        html: msg.html || msg.body || undefined,
+        thread_id: msg.thread_id || undefined,
+        reply_to_message_id: msg.reply_to_message_id || undefined,
+        attachments: msg.attachments || [],
+        date: new Date(msg.date * 1000).toISOString(),
+        read: !msg.unread,
+        labels: msg.folders || ['inbox'],
+        // Account info for UI badges
+        accountEmail: msg.accountEmail,
+        accountProvider: msg.accountProvider,
+        emailAccountId: msg.emailAccountId,
+        grantId: msg.grantId,
+      }))
+
+      console.log('📧 All Accounts Emails:', {
+        page,
+        batchIndex,
+        totalEmails: data.metadata?.totalCount,
+        paginatedCount: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+      })
+
+      // If page === 0, replace the list; otherwise append
+      if (page === 0) {
+        setFetchedMails(transformedMails)
+      } else {
+        setFetchedMails(prev => [...prev, ...transformedMails])
+      }
+
+      setFetchedHasMore(data.metadata?.hasMore || false)
+      if (!isLoadMore) {
+        setLoading(false)
+      }
+
+      // Return metadata for pagination logic
+      return {
+        totalFetched: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+        nextPage: page + 1,
+        nextBatchIndex: batchIndex,
+      }
+    } catch (error) {
+      console.error('Error fetching all accounts emails:', error)
+      if (!isLoadMore) {
+        setLoading(false)
+      }
+      throw error
+    }
+  }, [])
+
+  // Fetch emails from a specific folder across all accounts using expandable time windows
+  const fetchAllAccountsEmailsByFolder = React.useCallback(async (folderId: string = 'INBOX', page: number = 0, isLoadMore: boolean = false) => {
+    try {
+      if (!isLoadMore) {
+        setLoading(true)
+      }
+
+      const supabase = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+      
+      if (sessionError || !session?.user?.id) {
+        console.error('Failed to get auth session:', sessionError)
+        setLoading(false)
+        throw new Error('Not authenticated')
+      }
+
+      const params = new URLSearchParams()
+      params.set('userId', session.user.id)
+      params.set('folderId', folderId)
+      params.set('page', String(page))
+
+      const response = await fetch(`/api/accounts/all-emails-by-folder?${params.toString()}`)
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '<no body>')
+        console.error('Failed to fetch all accounts emails by folder:', {
+          status: response.status,
+          body: bodyText,
+        })
+        throw new Error(`Failed to fetch emails: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const emails = data.data || []
+
+      function stripHtml(input: string) {
+        if (!input) return ""
+        return input
+          .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+      }
+
+      const transformedMails = emails.map((msg: any) => ({
+        id: msg.id,
+        name: msg.from?.[0]?.name || msg.from?.[0]?.email || 'Unknown',
+        email: msg.from?.[0]?.email || '',
+        subject: msg.subject || '(No subject)',
+        text: msg.html || msg.body || stripHtml(msg.body) || msg.snippet || '',
+        html: msg.html || msg.body || undefined,
+        thread_id: msg.thread_id || undefined,
+        reply_to_message_id: msg.reply_to_message_id || undefined,
+        attachments: msg.attachments || [],
+        date: new Date(msg.date * 1000).toISOString(),
+        read: !msg.unread,
+        labels: msg.folders || ['inbox'],
+        accountEmail: msg.accountEmail,
+        accountProvider: msg.accountProvider,
+        emailAccountId: msg.emailAccountId,
+        grantId: msg.grantId,
+      }))
+
+      console.log('📂 All Accounts Emails By Folder:', {
+        folderId,
+        page,
+        totalEmails: data.metadata?.totalCount,
+        paginatedCount: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+      })
+
+      if (page === 0) {
+        setFetchedMails(transformedMails)
+      } else {
+        setFetchedMails(prev => [...prev, ...transformedMails])
+      }
+
+      setFetchedHasMore(data.metadata?.hasMore || false)
+      if (!isLoadMore) {
+        setLoading(false)
+      }
+
+      return {
+        totalFetched: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+        nextPage: page + 1,
+      }
+    } catch (error) {
+      console.error('Error fetching all accounts emails by folder:', error)
+      if (!isLoadMore) {
+        setLoading(false)
+      }
+      throw error
+    }
+  }, [])
 
   const fetchEmails = React.useCallback(async (grantId: string, folderId?: string, suppliedFilters?: EmailFilters, pageToken?: string | null) => {
     if (!grantId || grantId === 'none') {
@@ -163,6 +525,16 @@ export function Mail({
       setFetchedNextCursor(null)
       setFetchedHasMore(false)
       return
+    }
+
+    // Handle All Accounts mode - always start from batch 0
+    if (grantId === '__all_accounts__') {
+      // Route to folder-specific endpoint if a specific folder is requested
+      if (folderId) {
+        return fetchAllAccountsEmailsByFolder(folderId, 0, false)
+      }
+      // Otherwise use default all-emails endpoint (defaults to INBOX)
+      return fetchAllAccountsEmails(0, 0, false)
     }
     
     // Prevent duplicate concurrent fetches with intelligent deduplication
@@ -191,7 +563,6 @@ export function Mail({
       // Check if this is a draft folder fetch - use drafts API instead
       const isDraftFolder = folderId && String(folderId).toUpperCase() === 'DRAFT'
       let response
-      
       if (isDraftFolder) {
         // Use drafts endpoint for DRAFT folder
         const draftParams = new URLSearchParams()
@@ -292,9 +663,9 @@ export function Mail({
         name: msg.from?.[0]?.name || msg.from?.[0]?.email || 'Unknown',
         email: msg.from?.[0]?.email || '',
         subject: msg.subject || '(No subject)',
-        // prefer explicit snippet, fall back to plain-text-stripped html/body
-        text: msg.snippet || stripHtml(msg.body) || stripHtml(msg.html) || '',
-        // include raw html when provided so MailDisplay can render it
+        // Store full body in both text and html to ensure full content is displayed
+        text: msg.html || msg.body || stripHtml(msg.body) || msg.snippet || '',
+        // include raw html when provided so MailDisplay can render it with full content
         html: msg.html || msg.body || undefined,
         thread_id: msg.thread_id || undefined,
         reply_to_message_id: msg.reply_to_message_id || undefined,
@@ -302,7 +673,8 @@ export function Mail({
         // Convert Unix timestamp to ISO string for display
         date: new Date(msg.date * 1000).toISOString(),
         read: !msg.unread,
-        labels: msg.folders || ['inbox']
+        labels: msg.folders || ['inbox'],
+        emailAccountId: currentEmailAccountId // Add email account ID for RLS
       }))
       
       console.log('🔍 TRANSFORM DEBUG:', {
@@ -380,14 +752,14 @@ export function Mail({
   const [activeTab, setActiveTab] = React.useState<string>('all')
 
   // Fetch folders for sidebar counts when grant changes or a message is moved
-  const fetchFolders = React.useCallback(async () => {
+  const fetchFolders = React.useCallback(async (isBackgroundRefresh = true) => {
     if (!currentGrantId) {
       setSidebarFolders([])
       return
     }
     
-    // Only show loading state on initial load
-    if (initialSidebarLoad) {
+    // Only show loading state on initial load, NOT on background refreshes
+    if (initialSidebarLoad && !isBackgroundRefresh) {
       setSidebarLoading(true)
     }
     // Implement a small retry/backoff for transient 5xx errors from provider
@@ -397,7 +769,23 @@ export function Mail({
     while (attempt < maxAttempts) {
       attempt += 1
       try {
-        const res = await fetch(`/api/folders?grantId=${currentGrantId}`)
+        let foldersUrl = ''
+        if (currentGrantId === "__all_accounts__") {
+          // For all-accounts, we need to get userId from session
+          const supabase = createBrowserClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+          )
+          const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+          if (sessionError || !session?.user?.id) {
+            throw new Error('Not authenticated')
+          }
+          foldersUrl = `/api/accounts/all-folders?userId=${encodeURIComponent(session.user.id)}`
+        } else {
+          foldersUrl = `/api/folders?grantId=${currentGrantId}`
+        }
+        
+        const res = await fetch(foldersUrl)
         if (!res.ok) {
           const text = await res.text().catch(() => 'Failed to read error response')
           console.error('Failed to fetch folders:', {
@@ -424,6 +812,7 @@ export function Mail({
             id: folderId,
             name: folderId.charAt(0) + folderId.slice(1).toLowerCase(),
             total_count: 0,
+            unread_count: 0,
             system_folder: true
           })
         }
@@ -482,7 +871,7 @@ export function Mail({
           clone[ix2].total_count = Number(clone[ix2].total_count || 0) + 1
         } else {
           // Add a minimal entry so the sidebar shows the folder immediately (e.g., ARCHIVE)
-          clone.push({ id: toId, name: toId, total_count: 1, system_folder: toId === 'ARCHIVE' })
+          clone.push({ id: toId, name: toId, total_count: 1, unread_count: 0, system_folder: toId === 'ARCHIVE' })
         }
       }
 
@@ -490,8 +879,118 @@ export function Mail({
     })
 
     // Refresh authoritative folder list in background (do not await)
-    void fetchFolders()
+    // Pass true to indicate this is a background refresh, not initial load
+    void fetchFolders(true)
   }, [fetchFolders])
+
+  const handleLabelChange = React.useCallback((data: { messageId: string; oldLabelId: string | null; newLabelId: string | null }) => {
+    const { messageId, oldLabelId, newLabelId } = data
+
+    console.log(`🏷️ Label changed in mail list:`, { messageId, oldLabelId, newLabelId })
+
+    // If we're viewing a specific label's email list, update it
+    if (selectedLabelData) {
+      setSelectedLabelData((prev) => {
+        if (!prev) return prev
+
+        return {
+          ...prev,
+          emails: prev.emails.filter((email: Mail) => {
+            // Remove email from current label list if the old label was this label
+            if (oldLabelId === prev.labelId && newLabelId !== prev.labelId) {
+              return email.id !== messageId
+            }
+            return true
+          }),
+        }
+      })
+    }
+
+    // Trigger label count refresh to update sidebar counts
+    setLabelCountRefreshTrigger((prev) => prev + 1)
+  }, [selectedLabelData])
+
+  // Refresh handler for folder emails
+  const handleRefreshFolderEmails = React.useCallback(async () => {
+    if (!currentGrantId || !mailboxType) {
+      return
+    }
+    
+    // Reset pagination and refetch from Nylas
+    setFetchedMails([])
+    setFetchedNextCursor(null)
+    setFetchedHasMore(true)
+    await fetchEmails(currentGrantId, mailboxType, filters, null)
+  }, [currentGrantId, mailboxType, filters, fetchEmails])
+
+  // Refresh handler for labeled emails
+  const handleRefreshLabeledEmails = React.useCallback(async () => {
+    if (!selectedLabelData || !currentGrantId || !currentEmailAccountId) {
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `/api/labels/${selectedLabelData.labelId}/emails?grantId=${encodeURIComponent(currentGrantId)}&emailAccountId=${encodeURIComponent(currentEmailAccountId)}`,
+        {
+          method: 'GET',
+          credentials: 'include',
+        }
+      )
+
+      const result = await response.json()
+      const { data, success } = result
+
+      if (!success) {
+        console.error('Error refreshing labeled emails:', result.error)
+        return
+      }
+
+      // Map data to Mail format and update state
+      const emails = (data || []).map((item: any) => ({
+        id: item.message_id,
+        name: item.mail_details?.from?.[0]?.name || item.mail_details?.from?.[0]?.email || 'Unknown',
+        email: item.mail_details?.from?.[0]?.email || '',
+        subject: item.mail_details?.subject || '(No subject)',
+        text: item.mail_details?.body || item.mail_details?.snippet || '',
+        html: item.mail_details?.html,
+        body: item.mail_details?.body,
+        thread_id: item.mail_details?.thread_id,
+        from: item.mail_details?.from,
+        to: item.mail_details?.to,
+        cc: item.mail_details?.cc,
+        bcc: item.mail_details?.bcc,
+        reply_to: item.mail_details?.reply_to,
+        attachments: item.mail_details?.attachments || [],
+        date: (() => {
+          const dateValue = item.mail_details?.date;
+          if (!dateValue) return new Date().toISOString();
+          if (typeof dateValue === 'string') return dateValue;
+          if (typeof dateValue === 'number') return new Date(dateValue * 1000).toISOString();
+          return new Date().toISOString();
+        })(),
+        read: !item.mail_details?.unread,
+        labels: [selectedLabelData.labelName],
+        grant_id: item.mail_details?.grant_id || currentGrantId,
+        labelId: selectedLabelData.labelId,
+        emailAccountId: currentEmailAccountId,
+        mailDetails: item.mail_details,
+      }))
+
+      setSelectedLabelData(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          emails: emails
+        }
+      })
+
+      // Refresh label counts
+      setLabelCountRefreshTrigger(prev => prev + 1)
+    } catch (error) {
+      console.error('Error in handleRefreshLabeledEmails:', error)
+    }
+  }, [selectedLabelData, currentGrantId, currentEmailAccountId])
 
   // When account changes: (1) reset state, (2) fetch folders, (3) then fetch emails for INBOX
   React.useEffect(() => {
@@ -509,8 +1008,33 @@ export function Mail({
       setInitialSidebarLoad(true)
       currentSearchRef.current = ''
       isAccountChangeInProgressRef.current = false
+    } else if (currentGrantId === "__all_accounts__") {
+      // All Accounts mode - fetch ONLY page 0 initially
+      // Page 1+ will load when user reaches 50% threshold (handled by mail-list.tsx)
+      isAccountChangeInProgressRef.current = true
+      setFetchedMails([])
+      setSidebarFolders([])
+      setInitialSidebarLoad(true)
+      setMailboxType('INBOX')
+      setFilters({})
+      setSearchText('')
+      currentSearchRef.current = ''
+      setFetchedNextCursor(null)
+      setFetchedHasMore(true)
+      setCurrentBatch(0)
+      setIsPreloadingNextBatch(false)
+      setAllAccountsPage(0)
+      
+      // Fetch ONLY page 0 (200 emails) - no prefetching of pages 1,2,3
+      setTimeout(() => {
+        if (currentGrantId === "__all_accounts__") {
+          isAccountChangeInProgressRef.current = false
+          // Single fetch: page 0 only
+          void fetchAllAccountsEmailsByFolder('INBOX', 0, false)
+        }
+      }, 150)
     } else {
-      // Account selected
+      // Account selected (single account)
       isAccountChangeInProgressRef.current = true
       
       // Serialize: fetch folders FIRST, then emails
@@ -520,7 +1044,7 @@ export function Mail({
         // Use small delay to ensure folders response is fully processed
         setTimeout(() => {
           // Only fetch if still the same account (prevent race conditions)
-          if (currentGrantId) {
+          if (currentGrantId && currentGrantId !== "__all_accounts__") {
             setMailboxType('INBOX') // Now set mailboxType
             setFilters({}) // Now set filters to empty
             setSearchText('') // Reset search
@@ -535,7 +1059,7 @@ export function Mail({
         console.error('Failed to fetch folders:', err)
         // Even if folders fail, try to fetch emails
         setTimeout(() => {
-          if (currentGrantId) {
+          if (currentGrantId && currentGrantId !== "__all_accounts__") {
             setMailboxType('INBOX')
             setFilters({})
             setSearchText('')
@@ -569,23 +1093,123 @@ export function Mail({
       console.log('🔍 FILTERS CHANGED - REFETCHING EMAILS', {
         filters,
         mailboxType,
-        grantId: currentGrantId
+        grantId: currentGrantId,
+        isAllAccounts: currentGrantId === '__all_accounts__'
       })
       prevFiltersRef.current = filters
       
       // Reset pagination when filters change
       setFetchedNextCursor(null)
       setFetchedHasMore(true)
-      // Refetch with new filters
-      fetchEmails(currentGrantId, mailboxType, filters)
+      setAllAccountsPage(0)
+      
+      // Use different endpoint for all-accounts mode
+      if (currentGrantId === '__all_accounts__') {
+        performAllAccountsFilter(mailboxType, filters, 0)
+      } else {
+        fetchEmails(currentGrantId, mailboxType, filters)
+      }
     } else if (prevFiltersRef.current === null) {
       // First time initialization - just track, don't fetch
       prevFiltersRef.current = filters
     }
   }, [filters]) // ONLY depend on filters, not mailboxType or currentGrantId
 
+  // All-accounts filter function
+  const performAllAccountsFilter = React.useCallback(async (folder: string, filterObj: EmailFilters, page: number = 0) => {
+    try {
+      setLoading(true)
+
+      const supabase = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+      
+      if (sessionError || !session?.user?.id) {
+        console.error('Failed to get auth session:', sessionError)
+        setLoading(false)
+        throw new Error('Not authenticated')
+      }
+
+      const params = new URLSearchParams()
+      params.set('userId', session.user.id)
+      params.set('mailboxType', folder)
+      params.set('filters', JSON.stringify(filterObj))
+      params.set('page', String(page))
+
+      const response = await fetch(`/api/accounts/filter?${params.toString()}`)
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '<no body>')
+        console.error('Failed to filter all accounts:', {
+          status: response.status,
+          body: bodyText,
+        })
+        throw new Error(`Failed to filter emails: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const emails = data.data || []
+
+      // Transform emails to Mail format
+      function stripHtml(input: string) {
+        if (!input) return ""
+        return input
+          .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+      }
+
+      const transformedMails = emails.map((msg: any) => ({
+        id: msg.id,
+        name: msg.from?.[0]?.name || msg.from?.[0]?.email || 'Unknown',
+        email: msg.from?.[0]?.email || '',
+        subject: msg.subject || '(No subject)',
+        text: msg.html || msg.body || stripHtml(msg.body) || msg.snippet || '',
+        html: msg.html || msg.body || undefined,
+        thread_id: msg.thread_id || undefined,
+        reply_to_message_id: msg.reply_to_message_id || undefined,
+        attachments: msg.attachments || [],
+        date: new Date(msg.date * 1000).toISOString(),
+        read: !msg.unread,
+        labels: msg.folders || ['inbox'],
+        accountEmail: msg.accountEmail,
+        accountProvider: msg.accountProvider,
+        emailAccountId: msg.emailAccountId,
+        grantId: msg.grantId,
+      }))
+
+      console.log('📨 All-Accounts Filter Results:', {
+        mailboxType: folder,
+        totalFound: data.metadata?.totalCount,
+        pageCount: transformedMails.length,
+        hasMore: data.metadata?.hasMore,
+      })
+
+      if (page === 0) {
+        setFetchedMails(transformedMails)
+      } else {
+        setFetchedMails(prev => [...prev, ...transformedMails])
+      }
+
+      setFetchedHasMore(data.metadata?.hasMore || false)
+      setLoading(false)
+    } catch (error) {
+      console.error('Error filtering all accounts:', error)
+      setLoading(false)
+      throw error
+    }
+  }, [])
+
   const handleAccountChange = React.useCallback((grantId: string) => {
     setCurrentGrantId(grantId)
+    // Reset batch pagination when account changes
+    setCurrentBatch(0)
+    setIsPreloadingNextBatch(false)
     
     // Fetch the email account ID from Supabase based on grant_id
     const fetchAccountId = async () => {
@@ -709,14 +1333,14 @@ export function Mail({
             sizes
           )}`
         }}
-        className="h-full max-h-[800px] items-stretch"
+        className="h-full max-h-[100vh] items-stretch"
       >
         <ResizablePanel
-          defaultSize={defaultLayout[0]}
+          defaultSize={screenSize === 'mobile' ? 0 : responsiveLayout[0]}
           collapsedSize={navCollapsedSize}
           collapsible={true}
-          minSize={15}
-          maxSize={20}
+          minSize={screenSize === 'mobile' ? 0 : 5}
+          maxSize={screenSize === 'mobile' ? 0 : 25}
           onCollapse={() => {
             setIsCollapsed(true)
             document.cookie = `react-resizable-panels:collapsed=${JSON.stringify(
@@ -730,217 +1354,293 @@ export function Mail({
             )}`
           }}
           className={cn(
+            (screenSize === 'mobile') && "hidden",
             isCollapsed &&
               "min-w-[50px] transition-all duration-300 ease-in-out"
           )}
         >
           <ScrollArea className="h-full">
             <div className="flex flex-col h-full min-h-0">
-            <div
-              className={cn(
-                "flex h-[52px] items-center justify-center",
-                isCollapsed ? "h-[52px]" : "px-2"
-              )}
-            >
-              <AccountSwitcher
-                isCollapsed={isCollapsed}
-                accounts={accounts}
-                onAccountChange={handleAccountChange}
-              />
-            </div>
-            <Separator />
-            {/* Primary folders (Inbox, Sent, Important, Drafts, Spam/Junk, Trash) */}
-            <Nav
-              isCollapsed={isCollapsed}
-              loading={sidebarLoading}
-              links={(primaryLinksFromFolders.length > 0 ? primaryLinksFromFolders : primaryLinks)}
-              activeMailbox={mailboxType}
-              grantId={currentGrantId}
-              forwardEmail={forwardEmail}
-              onForwardEmailChange={setForwardEmail}
-              isComposeOpen={isComposeOpen}
-              onComposeOpenChange={setIsComposeOpen}
-              draftToEdit={draftToEdit}
-              onDraftEdit={setDraftToEdit}
-              onMailboxTypeChange={(folderId) => {
-                const folderToUse = folderId || 'INBOX'
-                // Prevent duplicate requests for the same folder (debounce rapid clicks)
-                if (lastFolderChangeRef.current?.grantId === currentGrantId && lastFolderChangeRef.current?.folder === folderToUse) {
-                  return
-                }
-                lastFolderChangeRef.current = { grantId: currentGrantId!, folder: folderToUse }
-                setMailboxType(folderToUse)
-                setFilters({}) // Reset filters when changing folders
-                setSearchText('') // Reset search when changing folders
-                currentSearchRef.current = ''
-                if (currentGrantId) {
-                  setFetchedNextCursor(null)
-                  setFetchedHasMore(true)
-                  // Fetch emails for new folder (request will be deduplicated if identical)
-                  fetchEmails(currentGrantId, folderToUse)
-                }
-              }}
-            />
-            <Separator />
-            {/* Labels / Custom Supabase Labels Only (No Nylas) */}
-            {currentGrantId && currentEmailAccountId && (
-              <div className="px-3 py-2">
-                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Labels</h3>
-                <CustomLabels 
-                  emailAccountId={currentEmailAccountId}
-                  onLabelSelect={(labelId, labelName, emails) => {
-                    setShowLabeledEmails(true)
-                  }}
+              {/* Logo Section */}
+              <div className={cn("flex items-center border-b",
+                isCollapsed ? "h-[52px] px-2 justify-center" : "justify-start h-[64px] px-2.5 py-2"
+              )}>
+                {isCollapsed ? (
+                  <div className="w-8 h-8 flex items-center justify-center">
+                    <img src="onebox_small.png" alt="" />
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-start">
+                    <img src="onebox.png" alt="" className="w-40 h-10" />
+                  </div>
+                )}
+              </div>
+
+              {/* Account Switcher */}
+              <div className={cn(
+                "flex h-[52px] items-center justify-center border-b",
+                isCollapsed ? "px-2" : "px-2"
+              )}>
+                <AccountSwitcher
+                  isCollapsed={isCollapsed}
+                  accounts={accounts}
+                  onAccountChange={handleAccountChange}
                 />
               </div>
-            )}
+
+              {/* Primary folders (Inbox, Sent, Important, Drafts, Spam/Junk, Trash) */}
+              <Nav
+                isCollapsed={isCollapsed}
+                loading={sidebarLoading}
+                links={(primaryLinksFromFolders.length > 0 ? primaryLinksFromFolders : primaryLinks)}
+                activeMailbox={mailboxType}
+                grantId={currentGrantId}
+                forwardEmail={forwardEmail}
+                onForwardEmailChange={setForwardEmail}
+                isComposeOpen={isComposeOpen}
+                onComposeOpenChange={setIsComposeOpen}
+                draftToEdit={draftToEdit}
+                onDraftEdit={setDraftToEdit}
+                onMailboxTypeChange={(folderId) => {
+                  const folderToUse = folderId || 'INBOX'
+                  if (lastFolderChangeRef.current?.grantId === currentGrantId && lastFolderChangeRef.current?.folder === folderToUse) {
+                    return
+                  }
+                  lastFolderChangeRef.current = { grantId: currentGrantId!, folder: folderToUse }
+                  setMailboxType(folderToUse)
+                  setSelectedLabelData(null)
+                  setFilters({})
+                  setSearchText('')
+                  currentSearchRef.current = ''
+                  setCurrentBatch(0)
+                  setIsPreloadingNextBatch(false)
+                  setAllAccountsPage(0)
+                  if (currentGrantId) {
+                    setFetchedNextCursor(null)
+                    setFetchedHasMore(true)
+                    // For all-accounts mode, use different endpoint
+                    if (currentGrantId === '__all_accounts__') {
+                      void fetchAllAccountsEmailsByFolder(folderToUse, 0, false)
+                    } else {
+                      fetchEmails(currentGrantId, folderToUse)
+                    }
+                  }
+                }}
+              />
+              <Separator />
+
+              {/* Labels / Custom Supabase Labels */}
+              {currentGrantId && currentEmailAccountId && (
+                <CustomLabels 
+                  emailAccountId={currentEmailAccountId}
+                  grantId={currentGrantId}
+                  isLoadingLabel={labelLoadingId !== null}
+                  isCollapsed={isCollapsed}
+                  refreshTrigger={labelCountRefreshTrigger}
+                  onMailboxTypeChange={(mailboxType) => {
+                    setMailboxType(mailboxType)
+                  }}
+                  onLabelSelect={(labelId, labelName, emails, labelColor) => {
+                    console.log('📬 CustomLabels callback received:', { labelId, labelName, labelColor, emailCount: emails.length })
+                    setLabelLoadingId(labelId)
+                    setSelectedLabelData({ labelId, labelName, labelColor, emails })
+                    setShowLabeledEmails(true)
+                    setLabelLoadingId(null)
+                  }}
+                />
+              )}
+
+              {/* Spacer to push account card to bottom */}
+              <div className="flex-1" />
+
+              {/* Account Details Card at Bottom */}
+              {currentGrantId && (
+                <div className={cn(
+                  "border-t p-3 space-y-3",
+                  isCollapsed ? "flex flex-col items-center" : ""
+                )}>
+                  {!isCollapsed ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-10 h-10 bg-gradient-to-br from-primary to-primary/70 rounded-full flex items-center justify-center text-white text-xs font-bold">
+                          {accounts[0]?.email?.charAt(0).toUpperCase() || 'U'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{accounts[0]?.label || 'Account'}</p>
+                          <p className="text-xs text-muted-foreground truncate">{accounts[0]?.email}</p>
+                        </div>
+                      </div>
+                      <div className="bg-primary/15 rounded-lg p-3 border border-primary/20">
+                        <p className="text-xs font-semibold mb-1">Upgrade to Pro</p>
+                        <p className="text-xs text-muted-foreground mb-2">Get unlimited labels and more features</p>
+                        <button className="w-full bg-primary text-primary-foreground text-xs font-medium py-1.5 rounded hover:bg-primary/90 transition-colors">
+                          Upgrade
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary/70 rounded-full flex items-center justify-center text-white text-xs font-bold">
+                      {accounts[0]?.email?.charAt(0).toUpperCase() || 'U'}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </ScrollArea>
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={defaultLayout[1]} minSize={30}>
-          {showLabeledEmails && currentGrantId && currentEmailAccountId ? (
-            <LabeledEmailsView 
-              emailAccountId={currentEmailAccountId}
-              grantId={currentGrantId}
-            />
-          ) : (
-            <Tabs defaultValue="all" onValueChange={(v) => setActiveTab(v)}>
-              <div className="flex items-center px-4 py-2">
-                <h1 className="text-xl font-bold">Inbox</h1>
-                <TabsList className="ml-auto">
-                  <TabsTrigger
-                    value="all"
-                    className="text-zinc-600 dark:text-zinc-200"
-                  >
-                    All mail
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="unread"
-                    className="text-zinc-600 dark:text-zinc-200"
-                  >
-                    Unread
-                  </TabsTrigger>
-                </TabsList>
-              </div>
+        <ResizablePanel defaultSize={responsiveLayout[1]} minSize={30}>
+          {!currentGrantId ? (
+            // Show "Select an account" message when no account is selected
+            <div className="h-full flex flex-col">
+              <MailHeader 
+                activeTab={activeTab}
+                onTabChange={(v) => setActiveTab(v)}
+                labelName={selectedLabelData?.labelName}
+                labelColor={selectedLabelData?.labelColor}
+              />
               <Separator />
-              <div className="bg-background/95 p-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-                <div className="relative">
-                  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input 
-                    placeholder="Search emails..." 
-                    className="pl-8 pr-20"
-                    value={searchText}
-                    onChange={(e) => handleSearchChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        handleSearchSubmit()
-                      }
-                    }}
-                  />
-                  <div className="absolute right-2 top-2.5 flex items-center gap-1">
-                    {searchText && (
-                      <button 
-                        type="button" 
-                        onClick={handleSearchClear}
-                        className="p-1 rounded hover:bg-accent/30 text-muted-foreground hover:text-foreground transition-colors"
-                        title="Clear search"
-                      >
-                        <X className="h-4 w-4" />
-                        <span className="sr-only">Clear search</span>
-                      </button>
-                    )}
-                    <button 
-                      type="button" 
-                      onClick={handleSearchSubmit}
-                      disabled={!searchText}
-                      className="p-1 rounded hover:bg-accent/30 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Search"
-                    >
-                      <Search className="h-4 w-4" />
-                      <span className="sr-only">Search</span>
-                    </button>
-                    <button type="button" onClick={() => setIsFilterOpen(true)} className="p-1 rounded hover:bg-accent/30">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M3 4h18M6 12h12M10 20h4"/></svg>
-                      <span className="sr-only">Open filters</span>
-                    </button>
-                  </div>
+              <MailSearchBar
+                searchText={searchText}
+                onSearchChange={handleSearchChange}
+                onSearchSubmit={handleSearchSubmit}
+                onSearchClear={handleSearchClear}
+                onFilterOpen={() => setIsFilterOpen(true)}
+              />
+              <div className="flex-1 flex flex-col items-center justify-center bg-background">
+                <div className="text-center space-y-4">
+                  <h2 className="text-2xl font-semibold text-foreground">Select an account to see emails</h2>
+                  <p className="text-muted-foreground max-w-md">
+                    Choose an email account from the account switcher above
+                  </p>
                 </div>
               </div>
-              <TabsContent value="all" className="m-0">
-                {!currentGrantId ? (
-                  <NoAccountMessage />
-                ) : loading ? (
+            </div>
+          ) : (
+            <>
+              <MailHeader 
+                activeTab={activeTab}
+                onTabChange={(v) => setActiveTab(v)}
+                labelName={selectedLabelData?.labelName}
+                labelColor={selectedLabelData?.labelColor}
+              />
+              <Separator />
+              <MailSearchBar
+                searchText={searchText}
+                onSearchChange={handleSearchChange}
+                onSearchSubmit={handleSearchSubmit}
+                onSearchClear={handleSearchClear}
+                onFilterOpen={() => setIsFilterOpen(true)}
+              />
+              {/* Show skeleton when label is loading */}
+              {labelLoadingId !== null && selectedLabelData === null ? (
+                <div className="p-4">
                   <MailListSkeleton />
-                ) : (
-                  <>
-                    {console.log('🎯 RENDERING MAILLIST WITH:', { mailCount: fetchedMails.length, loading })}
-                    <MailList 
-                      items={fetchedMails} 
-                      selectedGrantId={currentGrantId} 
-                      mailboxType={mailboxType} 
-                      isUnreadTab={activeTab === 'unread'} 
-                      dateFilterFrom={dateFilterFrom}
-                      dateFilterTo={dateFilterTo}
-                        filters={filters}
-                      onDateFilterChange={(from, to) => {
-                        setDateFilterFrom(from)
-                        setDateFilterTo(to)
-                      }}
-                      setItems={setFetchedMails} 
-                      onFolderChange={handleFolderChange}
-                      initialNextCursor={fetchedNextCursor} 
-                      initialHasMore={fetchedHasMore}
-                      onPaginate={async (cursor) => {
-                        // Pagination requested - fetch next page with same filters/search
-                        if (currentGrantId && mailboxType) {
-                          await fetchEmails(currentGrantId, mailboxType, filters, cursor)
+                </div>
+              ) : selectedLabelData !== null ? (
+                // Show labeled emails
+                <MailList
+                  items={selectedLabelData.emails}
+                  selectedGrantId={currentGrantId}
+                  mailboxType={`label:${selectedLabelData.labelName}`}
+                  initialNextCursor={null}
+                  initialHasMore={false}
+                  setItems={(updater) => {
+                    // Update selectedLabelData when emails are modified (e.g., marked as read)
+                    setSelectedLabelData(prev => {
+                      if (!prev) return prev
+                      return {
+                        ...prev,
+                        emails: typeof updater === 'function' ? updater(prev.emails) : updater
+                      }
+                    })
+                    // Trigger label count refresh to update unread counts
+                    setLabelCountRefreshTrigger(prev => prev + 1)
+                  }}
+                  onFolderChange={handleFolderChange}
+                  onRefresh={handleRefreshLabeledEmails}
+                  onPaginate={async (pageToken: string) => {
+                    // No pagination for labeled emails
+                  }}
+                />
+              ) : (
+                // Show folder emails (normal flow)
+                <MailListSection
+                  activeTab={activeTab}
+                  loading={loading}
+                  currentGrantId={currentGrantId}
+                  mailboxType={mailboxType}
+                  fetchedMails={fetchedMails}
+                  fetchedNextCursor={fetchedNextCursor}
+                  fetchedHasMore={fetchedHasMore}
+                  setFetchedMails={setFetchedMails}
+                  onFolderChange={handleFolderChange}
+                  onRefreshFolder={handleRefreshFolderEmails}
+                  onPaginate={async (cursor) => {
+                    if (currentGrantId && mailboxType) {
+                      // For all-accounts mode, load next page with expandable time windows
+                      if (currentGrantId === '__all_accounts__') {
+                        const nextPage = allAccountsPage + 1
+                        setAllAccountsPage(nextPage)
+                        console.log('📄 Paginating to page:', nextPage)
+                        // Always fetch with isLoadMore=true since we're fetching additional pages
+                        if (mailboxType === 'INBOX') {
+                          await fetchAllAccountsEmails(nextPage, 0, true)
+                        } else {
+                          await fetchAllAccountsEmailsByFolder(mailboxType, nextPage, true)
                         }
-                      }}
-                      onDraftClick={(draft) => {
-                        setDraftToEdit(draft)
-                        setIsComposeOpen(true)
-                      }}
-                    />
-                  </>
-                )}
-              </TabsContent>
-              <TabsContent value="unread" className="m-0">
-                {loading ? (
-                  <MailListSkeleton />
-                ) : (
-                  <MailList 
-                    items={(currentGrantId ? fetchedMails : (mails ?? [])).filter((item: Mail) => !item.read)} 
-                    selectedGrantId={currentGrantId}
-                    mailboxType={mailboxType}
-                    isUnreadTab={activeTab === 'unread'}
-                    setItems={setFetchedMails}
-                    onFolderChange={handleFolderChange}
-                    initialNextCursor={fetchedNextCursor} 
-                    initialHasMore={fetchedHasMore}
-                    onDraftClick={(draft) => {
-                      setDraftToEdit(draft)
-                      setIsComposeOpen(true)
-                    }}
-                  />
-                )}
-              </TabsContent>
-            </Tabs>
+                      } else {
+                        // For single-account mode, use cursor-based pagination
+                        await fetchEmails(currentGrantId, mailboxType, filters, cursor)
+                      }
+                    }
+                  }}
+                  onDraftClick={(draft) => {
+                    setDraftToEdit(draft)
+                    setIsComposeOpen(true)
+                  }}
+                  dateFilterFrom={dateFilterFrom}
+                  dateFilterTo={dateFilterTo}
+                  filters={filters}
+                  onDateFilterChange={(from, to) => {
+                    setDateFilterFrom(from)
+                    setDateFilterTo(to)
+                  }}
+                />
+              )}
+            </>
           )}
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={defaultLayout[2]} minSize={30}>
-          <MailDisplay
-            mail={(currentGrantId ? fetchedMails : (mails ?? [])).find((item: Mail) => item.id === mail.selected) || null}
-            selectedGrantId={currentGrantId}
-            setItems={setFetchedMails}
-            onFolderChange={handleFolderChange}
-            onForward={(forwardData) => {
-              setForwardEmail(forwardData);
-              // Trigger compose drawer to open
-              // This needs to be communicated to Nav component
-            }}
-          />
+        <ResizablePanel defaultSize={responsiveLayout[2]} minSize={screenSize === 'mobile' || screenSize === 'tablet' ? 0 : 30}>
+          {screenSize === 'mobile' || screenSize === 'tablet' ? (
+            // On mobile/tablet, right panel is hidden (shows nothing)
+            null
+          ) : (
+            // On desktop, show email detail or "No message selected"
+            mail.selected ? (
+              <MailDisplay
+                mail={(() => {
+                  if (selectedLabelData !== null) {
+                    return selectedLabelData.emails.find((item: Mail) => item.id === mail.selected) || null
+                  }
+                  return (currentGrantId ? fetchedMails : (mails ?? [])).find((item: Mail) => item.id === mail.selected) || null
+                })()}
+                selectedGrantId={currentGrantId}
+                setItems={setFetchedMails}
+                onFolderChange={handleFolderChange}
+                onLabelChange={handleLabelChange}
+                onForward={(forwardData: any) => {
+                  setForwardEmail(forwardData)
+                  setIsComposeOpen(true)
+                }}
+              />
+            ) : (
+              <div className="h-full flex items-center justify-center bg-background">
+                <p className="text-muted-foreground text-lg">No message selected</p>
+              </div>
+            )
+          )}
         </ResizablePanel>
       </ResizablePanelGroup>
       <FilterSheet open={isFilterOpen} onOpenChange={setIsFilterOpen} filters={filters} setFilters={setFilters} />

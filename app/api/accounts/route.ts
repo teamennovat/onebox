@@ -11,6 +11,13 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Special case: __all_accounts__ means fetch all accounts for the user
+    if (grantId === '__all_accounts__') {
+      // This is handled by extracting userId from context (auth user)
+      // For now, return empty - the all-emails endpoint handles this differently
+      return NextResponse.json({ accounts: [] })
+    }
+
     // Query by grantId
     if (grantId) {
       const { data: account, error } = await supabaseAdmin

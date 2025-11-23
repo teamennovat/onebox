@@ -41,6 +41,14 @@ export type Mail = {
   date: string
   read: boolean
   labels: string[]
+  // For labeled emails - label ID used for read status updates
+  labelId?: string
+  // Email account ID for API calls
+  emailAccountId?: string
+  // Account metadata for multi-account mode
+  accountEmail?: string
+  accountProvider?: string
+  grantId?: string
   // Optional runtime flags used by the UI (not persisted)
   isMoving?: boolean
   movedTo?: string

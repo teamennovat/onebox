@@ -51,8 +51,8 @@ export async function POST(
       // allow messageId in query/body as final fallback
       urlMessageId = urlMessageId || msgFromQuery || parsedBody?.messageId || null
 
-      if (!grantId) {
-        return NextResponse.json({ error: 'Grant ID is required' }, { status: 400 })
+      if (!grantId || grantId === '__all_accounts__') {
+        return NextResponse.json({ error: 'A specific Grant ID is required (cannot use __all_accounts__)' }, { status: 400 })
       }
 
       // Validate messageId

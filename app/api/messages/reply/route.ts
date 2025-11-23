@@ -69,6 +69,13 @@ export async function POST(request: NextRequest) {
 
     let resolvedGrantId = grantId;
 
+    // Validate grant ID cannot be __all_accounts__
+    if (grantId === '__all_accounts__') {
+      return NextResponse.json({ 
+        error: 'A specific Grant ID is required (cannot use __all_accounts__)' 
+      }, { status: 400 });
+    }
+
     // If grantId was provided via query params, use it directly (no session validation needed)
     // This allows easy local testing and curl requests
     if (!grantFromQuery) {

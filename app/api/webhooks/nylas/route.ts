@@ -360,7 +360,7 @@ async function labelMessage(
         email_account_id: emailAccountId,
         message_id: messageId,
         custom_label_id: labelId,
-        applied_by: appliedByGrantIds, // Array of grant_ids (TEXT[])
+        applied_by: appliedByGrantIds.length > 0 ? appliedByGrantIds : null, // Save grant_id array after DB migration
         applied_at: new Date().toISOString(),
         mail_details: mailDetails,
       })

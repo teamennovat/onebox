@@ -1,6 +1,7 @@
 import { addDays, addHours, format, nextSaturday } from "date-fns"
 import dynamic from 'next/dynamic'
 import { useState, useEffect, useRef } from 'react'
+import { createBrowserClient } from '@supabase/ssr'
 import {
   Archive,
   ArchiveX,
@@ -14,6 +15,8 @@ import {
   Trash2,
   X,
   Zap,
+  Check,
+  Tag,
 } from "lucide-react"
 
 import '@/app/quill.css'
@@ -57,6 +60,10 @@ import { DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
 
 import {
@@ -92,6 +99,7 @@ interface MailDisplayProps {
   setItems?: React.Dispatch<React.SetStateAction<Mail[]>>
   onFolderChange?: (opts?: { from?: string | null; to?: string | null }) => Promise<void> | void // callback to refresh folders after moves
   onForward?: (forwardData: { subject: string; body: string; attachments: Array<{ filename: string; content_type: string; size: number; id: string }> }) => void
+  onLabelChange?: (data: { messageId: string; oldLabelId: string | null; newLabelId: string | null }) => void // callback when label changes to refresh lists
   nylasApiKey?: string // optional, for fetching thread data if needed
 }
 
@@ -114,7 +122,7 @@ interface DisplayedMessage {
   isOwn?: boolean // true if this is the current user's own message (to style differently)
 }
 
-export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, onForward, nylasApiKey }: MailDisplayProps) {
+export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, onForward, onLabelChange, nylasApiKey }: MailDisplayProps) {
   const today = new Date()
   const [reply, setReply] = useState<ReplyState>({
     isOpen: false,
@@ -127,9 +135,12 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
   const [loadingThread, setLoadingThread] = useState(false)
   const autosaveRef = useRef<number | null>(null)
 
+  // Use the email's actual grantId, not the selected one (which might be __all_accounts__)
+  const actualGrantId = mail?.grantId || selectedGrantId
+
   // Fetch full thread when mail is selected
   useEffect(() => {
-    if (!mail?.thread_id || !selectedGrantId) {
+    if (!mail?.thread_id || !actualGrantId) {
       setThreadMessages([])
       return
     }
@@ -145,11 +156,11 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
           subject: mail.subject,
           from: mail.email,
           threadId: mail.thread_id,
-          grantId: selectedGrantId
+          grantId: actualGrantId
         })
         
         const response = await fetch(
-          `/api/messages/thread/${mail.thread_id}?grantId=${selectedGrantId}`,
+          `/api/messages/thread/${mail.thread_id}?grantId=${actualGrantId}`,
           { credentials: 'include' }
         )
         
@@ -214,7 +225,7 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
     }
 
     fetchThread()
-  }, [mail?.thread_id, selectedGrantId])
+  }, [mail?.thread_id, actualGrantId, mail?.grantId])
 
     const updateReadStatus = async (messageId: string, unread: boolean) => {
     // Optimistic update: mark read = !unread locally so UI updates instantly.
@@ -228,12 +239,12 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
       }
 
       const params = new URLSearchParams()
-      if (selectedGrantId) params.set('grantId', String(selectedGrantId))
+      if (actualGrantId) params.set('grantId', String(actualGrantId))
       params.set('unread', String(unread))
       const url = `/api/messages/${messageId}/read?${params.toString()}`
 
       // include cookies so the server can validate the Supabase session
-      console.debug('updateReadStatus request', { url, messageId, unread, grantId: selectedGrantId })
+      console.debug('updateReadStatus request', { url, messageId, unread, grantId: actualGrantId })
 
       const response = await fetch(url, {
         method: 'PUT',
@@ -248,7 +259,7 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
         const bodyText = await response.text().catch(() => '<no body>')
         console.error(`Failed to update message status: HTTP ${response.status}`, {
           messageId,
-          grantId: selectedGrantId,
+          grantId: actualGrantId,
           status: response.status,
           body: bodyText,
         })
@@ -264,6 +275,71 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
   // Important is a system folder, no need to create it
 
   const [optimisticLabels, setOptimisticLabels] = useState([] as string[]);
+  const [customLabels, setCustomLabels] = useState<Array<{ id: string; name: string; color: string }>>([]);
+  const [appliedCustomLabels, setAppliedCustomLabels] = useState<Set<string>>(new Set());
+  const [loadingLabels, setLoadingLabels] = useState(false);
+
+  // Initialize Supabase browser client
+  const supabase = useRef(createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )).current
+
+  // Fetch available labels when mail is selected - use same approach as custom-labels.tsx
+  useEffect(() => {
+    const fetchLabels = async () => {
+      if (!mail?.id) {
+        setCustomLabels([])
+        setAppliedCustomLabels(new Set())
+        return
+      }
+
+      try {
+        setLoadingLabels(true)
+
+        // Fetch all custom labels from Supabase (same as custom-labels.tsx)
+        const { data: allLabels, error: labelsError } = await supabase
+          .from('custom_labels')
+          .select('id, name, color, sort_order')
+          .order('sort_order', { ascending: true })
+
+        if (labelsError) {
+          console.error('❌ Error fetching labels:', labelsError)
+          setCustomLabels([])
+          setAppliedCustomLabels(new Set())
+          return
+        }
+
+        console.log('✅ Fetched custom_labels:', allLabels?.length)
+        setCustomLabels(allLabels || [])
+
+        // Fetch which labels are applied to this message
+        const { data: appliedLabels, error: appliedError } = await supabase
+          .from('message_custom_labels')
+          .select('custom_label_id')
+          .eq('message_id', mail.id)
+
+        if (appliedError) {
+          console.error('❌ Error fetching applied labels:', appliedError)
+          setAppliedCustomLabels(new Set())
+        } else {
+          const labelIds = new Set((appliedLabels || []).map((item: any) => item.custom_label_id))
+          console.log('✅ Applied labels:', Array.from(labelIds))
+          setAppliedCustomLabels(labelIds)
+        }
+      } catch (error) {
+        console.error('❌ Error fetching labels:', error)
+        setCustomLabels([])
+        setAppliedCustomLabels(new Set())
+      } finally {
+        setLoadingLabels(false)
+      }
+    }
+
+    if (mail) {
+      fetchLabels()
+    }
+  }, [mail?.id, supabase])
   
   const handleFolderAction = async (messageId: string, destination: string) => {
     if (!mail) return;
@@ -308,13 +384,13 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
       }
 
   const params = new URLSearchParams()
-  if (selectedGrantId) params.set('grantId', String(selectedGrantId))
+  if (actualGrantId) params.set('grantId', String(actualGrantId))
   // include destination and messageId as query params (defensive)
   params.set('destination', destination)
   params.set('messageId', messageId)
   const url = `/api/messages/${messageId}/move?${params.toString()}`
 
-      console.debug('handleFolderAction request', { url, messageId, destination, grantId: selectedGrantId })
+      console.debug('handleFolderAction request', { url, messageId, destination, grantId: actualGrantId })
 
       // include messageId and grantId in the body as a defensive fallback
       const response = await fetch(url, {
@@ -323,7 +399,7 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ destination, messageId, grantId: selectedGrantId ?? null })
+        body: JSON.stringify({ destination, messageId, grantId: actualGrantId ?? null })
       })
 
       if (!response.ok) {
@@ -331,7 +407,7 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
         console.error(`Failed to move message: HTTP ${response.status}`, {
           messageId,
           destination,
-          grantId: selectedGrantId,
+          grantId: actualGrantId,
           status: response.status,
           body: bodyText,
         })
@@ -372,6 +448,111 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
     } catch (error) {
       console.error('Error moving message:', error)
       alert('Failed to move message. Please try again.')
+    }
+  }
+
+  const handleCustomLabelAction = async (labelId: string) => {
+    if (!mail) return;
+
+    const isCurrentLabel = appliedCustomLabels.has(labelId)
+    
+    // Don't allow toggle off - must select a different label
+    if (isCurrentLabel) {
+      console.log(`⚠️ Label already applied, skipping (user must select a different label)`)
+      return
+    }
+
+    console.log(`🏷️ Label action: changing to label ${labelId} on message ${mail.id}`, { isCurrentLabel })
+
+    // Get the old label to remove
+    const oldLabelId = Array.from(appliedCustomLabels)[0] || null
+
+    // Optimistic update: remove old label, add new label
+    const newAppliedLabels = new Set<string>()
+    newAppliedLabels.add(labelId)
+    setAppliedCustomLabels(newAppliedLabels)
+
+    try {
+      // Step 1: Remove old label if it exists
+      if (oldLabelId) {
+        console.log(`🗑️ Removing old label:`, oldLabelId)
+        const { error: deleteError } = await supabase
+          .from('message_custom_labels')
+          .delete()
+          .eq('message_id', mail.id)
+          .eq('custom_label_id', oldLabelId)
+          .eq('email_account_id', mail.emailAccountId)
+
+        if (deleteError) {
+          console.error('❌ Error removing old label:', deleteError)
+          setAppliedCustomLabels(appliedCustomLabels)
+          alert(`Failed to remove previous label: ${deleteError.message}`)
+          return
+        }
+        console.log(`✅ Old label removed:`, oldLabelId)
+      }
+
+      // Step 2: Add new label
+      console.log(`➕ Adding new label:`, labelId)
+      const { error: insertError } = await supabase
+        .from('message_custom_labels')
+        .insert({
+          message_id: mail.id,
+          custom_label_id: labelId,
+          email_account_id: mail.emailAccountId,
+          applied_at: new Date().toISOString(),
+          applied_by: mail.grant_id ? [mail.grant_id] : null,
+          mail_details: {
+            subject: mail.subject,
+            from: mail.from || [{ email: mail.email, name: mail.name }],
+            to: mail.to,
+            cc: mail.cc,
+            bcc: mail.bcc,
+            reply_to: mail.reply_to,
+            snippet: mail.text?.substring(0, 200),
+            body: mail.body || mail.text,
+            html: mail.html,
+            date: mail.date,
+            thread_id: mail.thread_id,
+            folders: mail.labels,
+            unread: !mail.read,
+            grant_id: mail.grant_id,
+            attachments: mail.attachments,
+          }
+        })
+        .select()
+
+      if (insertError) {
+        console.error('❌ Error adding new label:', insertError)
+        // Rollback to old label state
+        if (oldLabelId) {
+          setAppliedCustomLabels(new Set([oldLabelId]))
+        } else {
+          setAppliedCustomLabels(new Set())
+        }
+        alert(`Failed to add label: ${insertError.message}`)
+        return
+      }
+      console.log(`✅ New label added:`, labelId)
+
+      // Step 3: Trigger callback to refresh email lists
+      if (onLabelChange) {
+        console.log(`📢 Triggering onLabelChange callback`, { messageId: mail.id, oldLabelId, newLabelId: labelId })
+        onLabelChange({
+          messageId: mail.id,
+          oldLabelId: oldLabelId,
+          newLabelId: labelId
+        })
+      }
+    } catch (error) {
+      console.error('❌ Error updating label:', error)
+      // Rollback to old label state
+      if (oldLabelId) {
+        setAppliedCustomLabels(new Set([oldLabelId]))
+      } else {
+        setAppliedCustomLabels(new Set())
+      }
+      alert('Failed to update label. Please try again.')
     }
   }
 
@@ -719,6 +900,49 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
           </Tooltip>
         </div>
         <Separator orientation="vertical" className="mx-2 h-6" />
+        
+        {/* Labels Dropdown */}
+        {customLabels.length > 0 && (
+          <>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-9 px-3">
+                  <Tag className="h-4 w-4 mr-2" />
+                  Labels
+                  {appliedCustomLabels.size > 0 && (
+                    <span className="ml-2 text-xs bg-primary text-primary-foreground rounded-full px-2 py-0.5">
+                      {appliedCustomLabels.size}
+                    </span>
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                {customLabels.map((label) => (
+                  <DropdownMenuItem
+                    key={label.id}
+                    onClick={() => {
+                      handleCustomLabelAction(label.id)
+                    }}
+                    className="cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 w-full">
+                      {appliedCustomLabels.has(label.id) && (
+                        <Check className="h-4 w-4 text-primary flex-shrink-0" />
+                      )}
+                      <div 
+                        className="w-3 h-3 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: label.color }}
+                      />
+                      <span className="flex-1">{label.name}</span>
+                    </div>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Separator orientation="vertical" className="mx-2 h-6" />
+          </>
+        )}
+        
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" disabled={!mail}>
@@ -730,11 +954,16 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
               <DropdownMenuItem onClick={() => mail?.id && updateReadStatus(mail.id, true)}>
                 Mark as unread
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => mail?.id && handleFolderAction(mail.id, 'starred')}>
-                Star thread
+              <DropdownMenuItem 
+                onClick={() => {
+                  const isStarred = (optimisticLabels || mail?.labels)?.map(String).join(' ').toLowerCase().includes('star');
+                  if (mail?.id) {
+                    handleFolderAction(mail.id, isStarred ? 'inbox' : 'starred');
+                  }
+                }}
+              >
+                {(optimisticLabels || mail?.labels)?.map(String).join(' ').toLowerCase().includes('star') ? 'Remove star' : 'Star thread'}
               </DropdownMenuItem>
-              <DropdownMenuItem>Add label</DropdownMenuItem>
-              <DropdownMenuItem>Mute thread</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -756,7 +985,15 @@ export function MailDisplay({ mail, selectedGrantId, setItems, onFolderChange, o
                   </AvatarFallback>
                 </Avatar>
                 <div className="grid gap-1">
-                  <div className="font-semibold">{mail.name}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="font-semibold">{mail.name}</div>
+                    {/* Account badge for multi-account emails */}
+                    {(mail as any).accountEmail && (
+                      <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                        {(mail as any).accountEmail.split('@')[0]}
+                      </span>
+                    )}
+                  </div>
                   <div className="line-clamp-1 text-xs">{mail.subject}</div>
                   <div className="line-clamp-1 text-xs">
                     <span className="font-medium">Reply-To:</span> {mail.email}

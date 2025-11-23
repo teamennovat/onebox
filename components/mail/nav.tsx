@@ -66,6 +66,9 @@ export function Nav({ links, isCollapsed, onMailboxTypeChange, activeMailbox: ex
     }
   }, [forwardEmail])
   
+  // Check if compose button should be hidden (when all accounts selected)
+  const isAllAccountsSelected = grantId === '__all_accounts__'
+  
   // Default labels with zero counts (shown when no account selected)
   const defaultLabels = React.useMemo(() => [
     { title: 'To Respond', count: 0 },
@@ -86,38 +89,40 @@ export function Nav({ links, isCollapsed, onMailboxTypeChange, activeMailbox: ex
         className="group flex flex-col gap-4 py-2 data-[collapsed=true]:py-2"
       >
         <nav className="grid gap-1 px-2 group-[[data-collapsed=true]]:justify-center group-[[data-collapsed=true]]:px-2">
-          {/* Compose Button */}
-          {isCollapsed ? (
-            <Tooltip delayDuration={0}>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={() => setIsComposeOpen(true)}
-                  className={cn(
-                    buttonVariants({ variant: "secondary", size: "icon" }),
-                    "h-9 w-9 mb-2",
-                    "dark:bg-muted dark:text-muted-foreground dark:hover:bg-muted dark:hover:text-white"
-                  )}
-                >
-                  <Pencil className="h-4 w-4" />
-                  <span className="sr-only">Compose</span>
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                Compose new email
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <button
-              onClick={() => setIsComposeOpen(true)}
-              className={cn(
-                buttonVariants({ variant: "secondary", size: "sm" }),
-                "dark:bg-muted dark:text-white dark:hover:bg-muted dark:hover:text-white",
-                "justify-start w-full mb-2"
-              )}
-            >
-              <Pencil className="mr-2 h-4 w-4" />
-              Compose
-            </button>
+          {/* Compose Button - Hidden when all accounts selected */}
+          {!isAllAccountsSelected && (
+            isCollapsed ? (
+              <Tooltip delayDuration={0}>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => setActualIsComposeOpen(true)}
+                    className={cn(
+                      buttonVariants({ variant: "secondary", size: "icon" }),
+                      "h-9 w-9 mb-2",
+                      "dark:bg-muted dark:text-muted-foreground dark:hover:bg-muted dark:hover:text-white"
+                    )}
+                  >
+                    <Pencil className="h-4 w-4" />
+                    <span className="sr-only">Compose</span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  Compose new email
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <button
+                onClick={() => setActualIsComposeOpen(true)}
+                className={cn(
+                  buttonVariants({ variant: "secondary", size: "sm" }),
+                  "dark:bg-muted dark:text-white dark:hover:bg-muted dark:hover:text-white",
+                  "justify-start w-full mb-2"
+                )}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Compose
+              </button>
+            )
           )}
 
           {/* Regular Navigation Links */}

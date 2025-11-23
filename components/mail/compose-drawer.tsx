@@ -3,15 +3,6 @@ import dynamic from "next/dynamic"
 import { format } from "date-fns"
 import { Button } from "@/components/ui/button"
 import {
-  Drawer,
-  DrawerClose,
-  DrawerContent,
-  DrawerDescription,
-  DrawerFooter,
-  DrawerHeader,
-  DrawerTitle,
-} from "@/components/ui/drawer"
-import {
   Sheet,
   SheetContent,
   SheetHeader,
@@ -669,17 +660,20 @@ export function ComposeDrawer({ open, onOpenChange, defaultDraft, grantId, forwa
         }
       }
 
-      // Build query params (grantId is REQUIRED)
+      // Build query params (grantId is REQUIRED and cannot be __all_accounts__)
       const queryParams = new URLSearchParams()
-      if (!effectiveGrantId) {
+      
+      // Validate grant ID
+      if (!effectiveGrantId || effectiveGrantId === '__all_accounts__') {
         toast({
           title: "Error",
-          description: "No account selected. Please select an email account first.",
+          description: "Please select a specific email account to send from.",
           variant: "destructive"
         })
         setIsSaving(false)
         return
       }
+      
       queryParams.append('grantId', effectiveGrantId)
       if (ccRecipients.length > 0) queryParams.append('cc', JSON.stringify(ccRecipients))
       if (bccRecipients.length > 0) queryParams.append('bcc', JSON.stringify(bccRecipients))
@@ -1265,22 +1259,9 @@ export function ComposeDrawer({ open, onOpenChange, defaultDraft, grantId, forwa
 
   return (
     <>
-      {/* Mobile: use Drawer (visible on small screens). Desktop: use Sheet (md+). */}
-      <Drawer open={open} onOpenChange={onOpenChange}>
-        <DrawerContent className={cn(
-          "md:hidden fixed inset-x-0 bottom-0 h-[85vh] border bg-background",
-        )}>
-          <DrawerHeader>
-            <DrawerTitle>Compose Email</DrawerTitle>
-          </DrawerHeader>
-
-          {formInner}
-        </DrawerContent>
-      </Drawer>
-
-      {/* Desktop sheet (md and up) */}
+      {/* Use Sheet for both mobile and desktop */}
       <Sheet open={open} onOpenChange={onOpenChange}>
-        <SheetContent side="right" className={cn("hidden md:block inset-y-0 right-0 h-full w-[75%] max-w-[1200px] border bg-background") }>
+        <SheetContent side="right" className={cn("inset-y-0 right-0 h-full w-[100%] sm:w-[75%] max-w-[1200px] border bg-background sm:border-l") }>
           <SheetHeader>
             <SheetTitle>Compose Email</SheetTitle>
           </SheetHeader>

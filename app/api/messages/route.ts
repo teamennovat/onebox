@@ -134,7 +134,12 @@ export async function GET(request: NextRequest) {
 
       // Always set `in` array parameter for messages list endpoint
       const providerValue = mapProviderFolder(folderValue)
-      console.debug('Mapping folder to provider value:', { input: folderValue, mapped: providerValue })
+      console.log('📨 MESSAGE FETCH - Mapping folder to provider value:', { 
+        input: folderValue, 
+        mapped: providerValue,
+        grantId,
+        limit
+      })
       url.searchParams.set('in', providerValue)
     }
 
@@ -148,15 +153,24 @@ export async function GET(request: NextRequest) {
 
     if (!response.ok) {
       const error = await response.text()
+      console.error('❌ NYLAS API ERROR:', {
+        status: response.status,
+        error,
+        url: url.toString(),
+        grantId,
+        folderValue
+      })
       throw new Error(`Nylas API error: ${error}`)
     }
 
     const data = await response.json()
-    console.log('✅ NYLAS API RESPONSE RECEIVED', {
+    console.log('✅ NYLAS API RESPONSE SUCCESS', {
       status: response.status,
-      dataKeys: Object.keys(data),
+      url: url.toString(),
       dataCount: data.data ? data.data.length : 'no data array',
-      nextCursor: data.next_cursor || data.nextCursor || 'none'
+      nextCursor: data.next_cursor || data.nextCursor || 'none',
+      folderValue,
+      grantId
     })
     // Some providers return pagination tokens in headers or different keys.
     // Normalize: if provider didn't include next_cursor in body, try headers (e.g., x-next-cursor) or Link header.

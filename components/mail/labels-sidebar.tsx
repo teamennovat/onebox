@@ -29,11 +29,11 @@ interface LabeledEmail {
 export function LabelsSidebar({
   emailAccountId,
   grantId,
-  onLabelSelect,
+  onLabelSelectAction,
 }: {
   emailAccountId?: string
   grantId?: string
-  onLabelSelect?: (labelId: string, labelName: string, emails: LabeledEmail[]) => void
+  onLabelSelectAction?: (labelId: string, labelName: string, emails: LabeledEmail[]) => void
 }) {
   const [labels, setLabels] = useState<LabelWithCount[]>([])
   const [loading, setLoading] = useState(false)
@@ -44,8 +44,19 @@ export function LabelsSidebar({
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   )
 
+  // Debug: Verify Supabase is configured correctly
   useEffect(() => {
-    if (!emailAccountId) return
+    console.log('🔧 LabelsSidebar Supabase Configuration:', {
+      url: process.env.NEXT_PUBLIC_SUPABASE_URL,
+      keyPrefix: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.substring(0, 20) + '...',
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!grantId) return
+
+    // Use a ref to track if this effect has run to prevent double-calls
+    let isMounted = true
 
     const fetchLabelsWithCounts = async () => {
       try {
@@ -57,110 +68,114 @@ export function LabelsSidebar({
           .select('id, name, color')
           .order('sort_order', { ascending: true })
 
+        if (!isMounted) return
         if (labelsError) {
           console.error('Error fetching labels:', labelsError)
           return
         }
 
-        // Get count for each label, filtering by applied_by if grantId provided
-        const labelsWithCounts = await Promise.all(
-          allLabels.map(async (label) => {
-            let query = supabase
-              .from('message_custom_labels')
-              .select('applied_by', { count: 'exact', head: true })
-              .eq('email_account_id', emailAccountId)
-              .eq('custom_label_id', label.id)
+        // Fetch ALL message_custom_labels ONCE, then filter in memory
+        const { data: allMessageLabels, error: msgError } = await supabase
+          .from('message_custom_labels')
+          .select('custom_label_id, applied_by')
 
-            const { count, data, error: countError } = await query
+        if (!isMounted) return
+        if (msgError) {
+          console.error('Error fetching message labels:', msgError)
+          return
+        }
 
-            // If grantId is provided, filter by applied_by matching the grant_id
-            let filteredCount = 0
-            if (grantId && data && !countError) {
-              filteredCount = data.filter((item: any) => {
-                const appliedBy = item.applied_by
-                if (Array.isArray(appliedBy)) {
-                  return appliedBy.includes(grantId)
-                } else if (typeof appliedBy === 'string') {
-                  return appliedBy === grantId
-                }
-                return false
-              }).length
-            } else {
-              filteredCount = countError ? 0 : count || 0
+        // Calculate counts in memory - ZERO additional API calls
+        const labelsWithCounts = allLabels.map((label) => {
+          const count = (allMessageLabels || []).filter((item: any) => {
+            // Check if this message_custom_label matches this label
+            if (item.custom_label_id !== label.id) return false
+
+            // Check if grant_id matches applied_by
+            // Match if: applied_by contains grantId OR applied_by is null
+            const appliedBy = item.applied_by
+            if (Array.isArray(appliedBy)) {
+              return appliedBy.includes(grantId)
+            } else if (appliedBy === null || appliedBy === undefined) {
+              // Include emails with no applied_by (legacy or system-labeled)
+              return true
+            } else if (appliedBy && appliedBy === grantId) {
+              return true
             }
+            return false
+          }).length
 
-            return {
-              ...label,
-              count: filteredCount,
-            }
-          })
-        )
+          return {
+            ...label,
+            count,
+          }
+        })
 
-        setLabels(labelsWithCounts.filter((l) => l.count > 0))
+        if (isMounted) {
+          setLabels(labelsWithCounts.filter((l) => l.count > 0))
+        }
       } catch (error) {
         console.error('Error fetching labels:', error)
       } finally {
-        setLoading(false)
+        if (isMounted) {
+          setLoading(false)
+        }
       }
     }
 
     fetchLabelsWithCounts()
-  }, [emailAccountId, grantId, supabase])
+
+    // Cleanup to prevent state updates after unmount
+    return () => {
+      isMounted = false
+    }
+  }, [grantId, supabase])
 
   const handleLabelClick = async (label: LabelWithCount, grantId?: string) => {
     const isSelected = selectedLabel === label.id
     
     if (!isSelected) {
-      // Fetch emails for this label from Supabase
+      // Fetch emails for this label from backend API
+      // This keeps Supabase credentials secure on the backend
       try {
-        const { data, error } = await supabase
-          .from('message_custom_labels')
-          .select(
-            `
-            id,
-            message_id,
-            applied_at,
-            applied_by,
-            mail_details,
-            custom_labels!inner(id, name, color)
-          `
-          )
-          .eq('custom_label_id', label.id)
-          .eq('email_account_id', emailAccountId)
-          .order('applied_at', { ascending: false })
-
-        if (error) {
-          console.error('Error fetching labeled emails:', error)
+        if (!grantId || !emailAccountId) {
+          console.error('Missing grantId or emailAccountId')
           return
         }
 
-        // Filter emails based on applied_by matching the current grant_id
-        // applied_by can be a single UUID or an array of UUIDs for multi-recipient emails
+        const response = await fetch(
+          `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&emailAccountId=${encodeURIComponent(emailAccountId)}`,
+          {
+            method: 'GET',
+            credentials: 'include',
+          }
+        )
+
+        const result = await response.json()
+        const { data, success } = result
+
+        if (!success) {
+          console.error('Error fetching labeled emails:', result.error)
+          return
+        }
+
+        // Map data to LabeledEmail format
         const emails: LabeledEmail[] = (data || [])
-          .filter((item: any) => {
-            // If grantId is provided, check if it matches applied_by
-            if (grantId) {
-              const appliedBy = item.applied_by
-              // Handle both single UUID and array of UUIDs
-              if (Array.isArray(appliedBy)) {
-                return appliedBy.includes(grantId)
-              } else if (typeof appliedBy === 'string') {
-                return appliedBy === grantId
-              }
-              return false
-            }
-            // If no grantId, include all emails
-            return true
-          })
           .map((item: any) => ({
             id: item.message_id,
             name: item.mail_details?.from?.[0]?.name || item.mail_details?.from?.[0]?.email || 'Unknown',
             email: item.mail_details?.from?.[0]?.email || '',
             subject: item.mail_details?.subject || '(No subject)',
             text: item.mail_details?.snippet || item.mail_details?.body?.substring(0, 100) || '',
-            date: new Date(item.mail_details?.date ? item.mail_details.date * 1000 : Date.now()).toISOString(),
+            date: (() => {
+              const dateValue = item.mail_details?.date;
+              if (!dateValue) return new Date().toISOString();
+              if (typeof dateValue === 'string') return dateValue;
+              if (typeof dateValue === 'number') return new Date(dateValue * 1000).toISOString();
+              return new Date().toISOString();
+            })(),
             read: !item.mail_details?.unread,
-            labels: [item.custom_labels.name],
+            labels: [label.name],
             messageId: item.message_id,
             grantId: item.mail_details?.grant_id,
             mailDetails: item.mail_details,
@@ -168,8 +183,8 @@ export function LabelsSidebar({
 
         setSelectedLabel(label.id)
         
-        if (onLabelSelect) {
-          onLabelSelect(label.id, label.name, emails)
+        if (onLabelSelectAction) {
+          onLabelSelectAction(label.id, label.name, emails)
         }
       } catch (error) {
         console.error('Error in handleLabelClick:', error)

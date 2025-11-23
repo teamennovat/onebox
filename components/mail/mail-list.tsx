@@ -7,7 +7,7 @@ import { Mail } from "./use-mail"
 import { useMail } from "./use-mail";
 import { MailListSkeleton } from "./mail-list-skeleton"
 import { cn } from "../../lib/utils";
-import { Archive, ArchiveX, Trash2, Star } from "lucide-react";
+import { Archive, ArchiveX, Trash2, Star, RefreshCw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import type { EmailFilters } from "./filter-sheet"
 import { Badge } from "../ui/badge";
@@ -30,10 +30,13 @@ interface MailListProps {
   onDraftClick?: (draft: Mail) => void
   // Pagination callback for parent to handle fetching next page with current filters/search
   onPaginate?: (pageToken: string) => Promise<void>
+  // Optional refresh callback for labeled emails
+  onRefresh?: () => Promise<void>
 }
 
-export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, setItems, initialNextCursor, initialHasMore, onFolderChange, dateFilterFrom, dateFilterTo, filters, onDateFilterChange, onDraftClick, onPaginate }: MailListProps) {
+export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, setItems, initialNextCursor, initialHasMore, onFolderChange, dateFilterFrom, dateFilterTo, filters, onDateFilterChange, onDraftClick, onPaginate, onRefresh }: MailListProps) {
   const [mail, setMail] = useMail()
+  const [isRefreshing, setIsRefreshing] = React.useState(false)
   const CHUNK_SIZE = 50 
   const API_FETCH_SIZE = 200
   const PREFETCH_AT_EMAIL = 100
@@ -44,6 +47,7 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
   const lastRequestedCursor = React.useRef<string | null>(null)
   const debounceTimer = React.useRef<number | null>(null)
   const prevFiltersRef = React.useRef<{ from: number | null | undefined; to: number | null | undefined } | null>(null)
+  const lastPrefetchedPageRef = React.useRef<number>(0) // Track last prefetched batch (batch 0 is initial load)
 
   const [allEmails, setAllEmails] = React.useState<Mail[]>(items || [])
   const [displayEmails, setDisplayEmails] = React.useState<Mail[]>([])
@@ -53,6 +57,7 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
   const [isFetchingBackground, setIsFetchingBackground] = React.useState(false)
   const [hasMoreEmails, setHasMoreEmails] = React.useState(true)
   const [lastFetchPosition, setLastFetchPosition] = React.useState(0)
+  const [isOnLastFetchedPage, setIsOnLastFetchedPage] = React.useState(false) // Track if user is on the last currently-loaded page
   const prevMailboxTypeRef = React.useRef<string | undefined>(undefined)
   const prevSelectedGrantIdRef = React.useRef<string | null | undefined>(undefined)
   const isInitialDateFilterMountRef = React.useRef(true)
@@ -85,6 +90,7 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
       setNextCursor(null)
       setHasMoreEmails(true)
       setLastFetchPosition(0)
+      setIsOnLastFetchedPage(false)
     } else {
       console.log('⏰ mailbox effect: NOT resetting (still initial mount)')
     }
@@ -140,6 +146,7 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
       setNextCursor(null)
       setHasMoreEmails(true)
       setLastFetchPosition(0)
+      setIsOnLastFetchedPage(false)
       // DO NOT fetch here - parent mail.tsx handles fetching with filters
     }, 300)
 
@@ -167,8 +174,13 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
   React.useEffect(() => {
     console.log('⚡ updateDisplayEmails effect triggered:', { currentChunk, allEmailsLength: allEmails.length })
     updateDisplayEmails()
-    checkAndPrefetch()
-  }, [currentChunk, allEmails])
+    
+    // ONLY check prefetch in all-accounts mode
+    const isAllAccountsMode = selectedGrantId === '__all_accounts__'
+    if (isAllAccountsMode) {
+      checkAndPrefetch()
+    }
+  }, [currentChunk, allEmails, selectedGrantId])
 
   React.useEffect(() => {
     console.log('📦 displayEmails state changed:', {
@@ -371,162 +383,165 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
     const startIndex = currentChunk * CHUNK_SIZE
     const endIndex = startIndex + CHUNK_SIZE
 
-    // Always show available data, don't try to fetch here
-    // Parent (mail.tsx) handles all fetching
+    // Get the slice of emails to display
     const chunk = allEmails.slice(startIndex, endIndex)
     
-    console.log('🔄 updateDisplayEmails called:', {
+    console.log('📄 updateDisplayEmails:', {
       currentChunk,
       startIndex,
       endIndex,
       chunkLength: chunk.length,
       allEmailsLength: allEmails.length,
-      CHUNK_SIZE
+      emails: chunk.map(e => e.id)
     })
     
-    if (chunk.length > 0) {
-      console.log('📧 displayEmails being set to:', {
-        chunk: currentChunk,
-        showing: `${startIndex + 1}-${Math.min(endIndex, allEmails.length)} of ${allEmails.length}`,
-        itemCount: chunk.length
-      })
-      setDisplayEmails(chunk)
-    } else if (allEmails.length === 0) {
-      // No data available
-      console.log('🟪 No data available, setting displayEmails to empty')
-      setDisplayEmails([])
-    } else {
-      console.log('⚠️ Chunk is empty but allEmails has data:', {
-        startIndex,
-        endIndex,
-        allEmailsLength: allEmails.length
-      })
-    }
+    setDisplayEmails(chunk)
   }
 
   function checkAndPrefetch() {
-    const chunksPerBatch = API_FETCH_SIZE / CHUNK_SIZE
-    const chunkInBatch = currentChunk % chunksPerBatch
-    const currentBatchNumber = Math.floor(currentChunk / chunksPerBatch)
-    const currentPosition = currentChunk * CHUNK_SIZE + 1
+    const isAllAccountsMode = selectedGrantId === '__all_accounts__'
     
-    const shouldPrefetch = (
-      nextCursor &&
-      !isFetchingBackground &&
-      hasMoreEmails &&
-      chunkInBatch === 1 &&
-      currentPosition > lastFetchPosition &&
-      !inFlight.current &&
-      lastRequestedCursor.current !== nextCursor
-    )
+    if (!isAllAccountsMode) {
+      return // Only prefetch in all-accounts mode
+    }
 
+    // Prefetch strategy: Load next batch when at 50% through current batch
+    // Each batch = 4 pages (200 emails / 50 per page)
+    // Page 0-3 = batch 0, Page 4-7 = batch 1, Page 8-11 = batch 2, etc.
+    // Trigger prefetch at page 2, 6, 10, 14... (middle of each batch)
+    // So next batch is ready BEFORE reaching pages 4, 8, 12, 16... (start of next batch)
+    
+    const pagesPerBatch = 4
+    const currentBatch = Math.floor(currentChunk / pagesPerBatch)
+    const currentPageInBatch = currentChunk % pagesPerBatch
+    
+    // Prefetch when we're at page 2 within the batch (50% through)
+    const shouldPrefetch = currentPageInBatch === 2 && !isFetchingBackground && !inFlight.current && onPaginate
+    
     if (shouldPrefetch) {
-      console.debug('Prefetch triggered (at batch transition chunk)', {
-        currentChunk,
-        chunkInBatch,
-        currentBatchNumber,
-        currentPosition,
-        chunksPerBatch,
-        nextCursor
-      })
-      setLastFetchPosition(currentPosition)
+      // Next batch that needs to be prefetched
+      const nextBatchNumber = currentBatch + 1
       
-      // Use parent's onPaginate callback if available (for search/filter context)
-      // Otherwise fall back to local fetchBatch
-      if (onPaginate && nextCursor) {
-        console.debug('📄 PAGINATION: Using onPaginate callback for prefetch', { nextCursor })
-        setIsFetchingBackground(true)
-        inFlight.current = true
-        lastRequestedCursor.current = nextCursor
-        
-        onPaginate(nextCursor)
-          .then(() => {
-            console.debug('📄 PAGINATION: onPaginate succeeded')
-          })
-          .catch((err) => {
-            console.error('📄 PAGINATION: onPaginate failed', err)
-          })
-          .finally(() => {
-            inFlight.current = false
-            setIsFetchingBackground(false)
-          })
-      } else {
-        console.debug('No onPaginate callback, using local fetchBatch')
-        fetchBatch(nextCursor, true)
+      // Check if we've already prefetched this batch
+      const alreadyPrefetched = lastPrefetchedPageRef.current >= nextBatchNumber
+      
+      if (alreadyPrefetched) {
+        console.log('✅ Already prefetched batch', { currentBatch, nextBatchNumber, lastPrefetched: lastPrefetchedPageRef.current })
+        return
       }
+      
+      console.log('⚡ PREFETCH TRIGGERED at page', currentChunk, '(batch', currentBatch, 'page', currentPageInBatch, ') | Prefetching batch', nextBatchNumber, 'with', allEmails.length, 'emails loaded', {
+        currentChunk,
+        currentBatch,
+        currentPageInBatch,
+        nextBatchNumber,
+        totalEmails: allEmails.length
+      })
+      
+      // Mark that we're prefetching this batch
+      lastPrefetchedPageRef.current = nextBatchNumber
+      
+      // Fetch next 200 emails in background
+      inFlight.current = true
+      setIsFetchingBackground(true)
+      
+      const prefetchNextBatch = async () => {
+        try {
+          await onPaginate('')
+          console.log('✅ Background prefetch completed for batch', nextBatchNumber, '| now have', allEmails.length, 'emails')
+        } catch (error) {
+          console.error('Error in prefetch batch', nextBatchNumber, ':', error)
+          lastPrefetchedPageRef.current = nextBatchNumber - 1 // Reset on error
+        } finally {
+          inFlight.current = false
+          setIsFetchingBackground(false)
+        }
+      }
+      
+      void prefetchNextBatch()
     }
   }
 
   function goToNextChunk() {
     const desired = currentChunk + 1
-    const neededEnd = (desired + 1) * CHUNK_SIZE
-    const currentBatch = Math.floor(neededEnd / API_FETCH_SIZE)
+    const startIndex = desired * CHUNK_SIZE
+    const endIndex = startIndex + CHUNK_SIZE
+    const isAllAccountsMode = selectedGrantId === '__all_accounts__'
     
+    if (isAllAccountsMode) {
+      // All-accounts mode: just navigate through existing data
+      // NO requests here - checkAndPrefetch will handle loading more data
+      if (endIndex <= allEmails.length) {
+        // We have the data, just show it
+        setCurrentChunk(desired)
+        setIsOnLastFetchedPage(false)
+        return
+      }
+      
+      // If we don't have data yet, don't advance
+      // Wait for checkAndPrefetch to load more
+      console.log('⏸️ Cannot navigate to page', desired, '- need', endIndex, 'but only have', allEmails.length, 'emails')
+      return
+    }
+    
+    // Single-account mode: cursor-based pagination (original logic)
+    const neededEnd = (desired + 1) * CHUNK_SIZE
     const haveNextChunkData = neededEnd <= allEmails.length
 
     if (haveNextChunkData) {
-      // Already have data, just move to next chunk (instant)
       setCurrentChunk((c) => c + 1)
-    } else if (hasMoreEmails && nextCursor) {
-      // Need to fetch more data
-      if (!isLoading && !isFetchingBackground && !inFlight.current) {
-        console.debug('Fetching next batch for chunk navigation', {
-          currentChunk: desired,
-          neededEnd,
-          currentBatch
-        })
+    } else if (hasMoreEmails && nextCursor && !isLoading && !isFetchingBackground && !inFlight.current) {
+      if (onPaginate) {
+        inFlight.current = true
+        lastRequestedCursor.current = nextCursor
         
-        // IMPORTANT: For user-initiated "Next" clicks, we MUST show loading state
-        // But we should move to next chunk immediately while fetching in background
-        // This gives the user instant UI feedback
-        
-        // Use parent's onPaginate callback if available
-        if (onPaginate) {
-          console.debug('📄 PAGINATION: Using onPaginate callback for chunk navigation', { nextCursor })
-          inFlight.current = true
-          lastRequestedCursor.current = nextCursor
-          
-          // Move to next chunk immediately (don't wait for fetch)
-          setCurrentChunk((c) => c + 1)
-          
-          // Fetch in background (don't block UI with setIsLoading)
-          setIsFetchingBackground(true)
-          onPaginate(nextCursor)
-            .then(() => {
-              console.debug('📄 PAGINATION: onPaginate succeeded')
-            })
-            .catch((err) => {
-              console.error('📄 PAGINATION: onPaginate failed', err)
-            })
-            .finally(() => {
-              inFlight.current = false
-              setIsFetchingBackground(false)
-            })
-        } else {
-          console.debug('No onPaginate callback, using local fetchBatch')
-          setIsLoading(true)
-          fetchBatch(nextCursor, false)
-            .then(() => {
-              setCurrentChunk((c) => c + 1)
-            })
-            .finally(() => {
-              setIsLoading(false)
-            })
-        }
+        setCurrentChunk((c) => c + 1)
+        setIsFetchingBackground(true)
+        onPaginate(nextCursor)
+          .finally(() => {
+            inFlight.current = false
+            setIsFetchingBackground(false)
+          })
       } else {
-        const checkInterval = setInterval(() => {
-          if (!isLoading && !isFetchingBackground && !inFlight.current) {
-            clearInterval(checkInterval)
+        setIsLoading(true)
+        fetchBatch(nextCursor, false)
+          .then(() => {
             setCurrentChunk((c) => c + 1)
-          }
-        }, 100)
-        setTimeout(() => clearInterval(checkInterval), 10000)
+          })
+          .finally(() => {
+            setIsLoading(false)
+          })
       }
     }
   }
 
   function goToPreviousChunk() {
     if (currentChunk > 0) setCurrentChunk((c) => c - 1)
+  }
+
+  async function handleRefresh() {
+    setIsRefreshing(true)
+    try {
+      // If custom refresh handler provided (for labeled emails), use it
+      if (onRefresh) {
+        await onRefresh()
+      } else {
+        // Default behavior for folder emails
+        setCurrentChunk(0)
+        setAllEmails([])
+        setDisplayEmails([])
+        setNextCursor(null)
+        setHasMoreEmails(true)
+        setLastFetchPosition(0)
+        
+        // Trigger parent refresh
+        if (onFolderChange) {
+          await onFolderChange()
+        }
+      }
+    } finally {
+      setIsRefreshing(false)
+    }
   }
 
   const startEmail = displayEmails.length > 0 ? currentChunk * CHUNK_SIZE + 1 : 0
@@ -539,11 +554,21 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
           <Button 
             variant="secondary" 
             size="icon" 
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            title="Refresh email list"
+            className={isRefreshing ? "animate-spin" : ""}
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+          <Button 
+            variant="secondary" 
+            size="icon" 
             onClick={goToPreviousChunk} 
             disabled={currentChunk === 0} 
             aria-label="Previous 50"
           >
-            &lt;
+            {'<'}
           </Button>
           <div className="text-sm">
             <span>
@@ -557,14 +582,14 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
             disabled={!(endEmail < allEmails.length || hasMoreEmails)} 
             aria-label="Next 50"
           >
-            &gt;
+            {'>'}
           </Button>
         </div>
       </div>
       <div className="flex-1 overflow-auto">
         <ScrollArea className="h-full">
-          <div className="flex flex-col gap-2 p-4 pt-0">
-            {isLoading && displayEmails.length === 0 ? (
+          <div className="flex flex-col gap-2 p-4 pt-0 mb-[150px]">
+            {(isLoading && displayEmails.length === 0) || (isFetchingBackground && displayEmails.length === 0) ? (
               <MailListSkeleton />
             ) : (
               <>
@@ -600,13 +625,13 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
 
                       // Then send API request
                       const params = new URLSearchParams();
-                      if (selectedGrantId) params.set('grantId', selectedGrantId);
+                      if (item.grantId) params.set('grantId', item.grantId);
                       params.set('messageId', item.id);
                       params.set('destination', destination);
                       fetch(`/api/messages/${item.id}/move?${params.toString()}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ destination, grantId: selectedGrantId }),
+                        body: JSON.stringify({ destination, grantId: item.grantId }),
                       }).catch(error => {
                         console.error('Failed to move message:', error);
                         // Revert optimistic update on error
@@ -643,13 +668,13 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
 
                       // Then send API request
                       const params = new URLSearchParams();
-                      if (selectedGrantId) params.set('grantId', selectedGrantId);
+                      if (item.grantId) params.set('grantId', item.grantId);
                       params.set('messageId', item.id);
                       params.set('destination', destination);
                       fetch(`/api/messages/${item.id}/move?${params.toString()}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ destination, grantId: selectedGrantId }),
+                        body: JSON.stringify({ destination, grantId: item.grantId }),
                       }).catch(error => {
                         console.error('Failed to move message:', error);
                         // Revert optimistic update on error
@@ -686,13 +711,13 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
 
                       // Then send API request
                       const params = new URLSearchParams();
-                      if (selectedGrantId) params.set('grantId', selectedGrantId);
+                      if (item.grantId) params.set('grantId', item.grantId);
                       params.set('messageId', item.id);
                       params.set('destination', destination);
                       fetch(`/api/messages/${item.id}/move?${params.toString()}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ destination, grantId: selectedGrantId }),
+                        body: JSON.stringify({ destination, grantId: item.grantId }),
                       }).catch(error => {
                         console.error('Failed to move message:', error);
                         // Revert optimistic update on error
@@ -724,13 +749,13 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
 
                     // Then send API request
                     const params = new URLSearchParams();
-                    if (selectedGrantId) params.set('grantId', selectedGrantId);
+                    if (item.grantId) params.set('grantId', item.grantId);
                     params.set('messageId', item.id);
                     params.set('destination', destination);
                     fetch(`/api/messages/${item.id}/move?${params.toString()}`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ destination, grantId: selectedGrantId }),
+                      body: JSON.stringify({ destination, grantId: item.grantId }),
                     }).catch(error => {
                       console.error('Failed to move message:', error);
                       // Revert optimistic update on error
@@ -767,10 +792,18 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
                       }
 
                       // Fire and forget API call to mark as read
+                      const isLabeledEmail = item.labelId && item.emailAccountId
                       const params = new URLSearchParams()
-                      if (selectedGrantId) params.set('grantId', String(selectedGrantId))
+                      if (item.grantId) params.set('grantId', String(item.grantId))
                       params.set('unread', 'false')
-                      const url = `/api/messages/${item.id}/read?${params.toString()}`
+                      
+                      // Use label-specific read endpoint for labeled emails, general endpoint for folder emails
+                      let url: string
+                      if (isLabeledEmail) {
+                        url = `/api/labels/${item.labelId}/messages/${item.id}/read?${params.toString()}&emailAccountId=${encodeURIComponent(item.emailAccountId!)}`
+                      } else {
+                        url = `/api/messages/${item.id}/read?${params.toString()}`
+                      }
                       
                       fetch(url, {
                         method: 'PUT',
@@ -795,13 +828,19 @@ export function MailList({ items, selectedGrantId, mailboxType, isUnreadTab, set
                   }}
                 >
                   <div className="flex w-full flex-col gap-1">
-                    <div className="flex items-center">
+                    <div className="flex items-center gap-2">
                       <div className="flex items-center gap-2">
                         <div className="font-semibold">{item.name}</div>
                         {!item.read && (
                           <span className="flex h-2 w-2 rounded-full bg-blue-600" />
                         )}
                       </div>
+                      {/* Account badge for multi-account mode */}
+                      {(item as any).accountEmail && (
+                        <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
+                          {(item as any).accountEmail.split('@')[0]}
+                        </span>
+                      )}
                       <div
                         className={cn(
                           "ml-auto text-xs",
