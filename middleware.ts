@@ -41,6 +41,17 @@ export async function middleware(request: NextRequest) {
 
   const url = request.nextUrl.clone()
 
+  // Redirect root to signin if not authenticated, otherwise to connect
+  if (url.pathname === '/') {
+    if (!session) {
+      url.pathname = '/auth/signin'
+      return NextResponse.redirect(url)
+    } else {
+      url.pathname = '/connect'
+      return NextResponse.redirect(url)
+    }
+  }
+
   // Protect dashboard routes
   if (url.pathname.startsWith('/dashboard')) {
     if (!session) {
@@ -49,10 +60,18 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // Redirect logged-in users from signin to dashboard
+  // Protect connect routes
+  if (url.pathname.startsWith('/connect')) {
+    if (!session) {
+      url.pathname = '/auth/signin'
+      return NextResponse.redirect(url)
+    }
+  }
+
+  // Redirect logged-in users from signin to connect
   if (url.pathname === '/auth/signin') {
     if (session) {
-      url.pathname = '/dashboard'
+      url.pathname = '/connect'
       return NextResponse.redirect(url)
     }
   }
@@ -60,7 +79,7 @@ export async function middleware(request: NextRequest) {
   return response
 }
 
-// Only run this middleware for the dashboard and signin routes
+// Only run this middleware for the root, dashboard, connect, and signin routes
 export const config = {
-  matcher: ['/dashboard/:path*', '/auth/signin'],
+  matcher: ['/', '/dashboard/:path*', '/connect/:path*', '/auth/signin'],
 }

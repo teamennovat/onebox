@@ -2,29 +2,49 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { Mail, CheckCircle, ChevronRight, Sparkles, InboxIcon, Tags } from 'lucide-react'
+import { Mail, ChevronLeft, Sparkles, InboxIcon, Tags } from 'lucide-react'
 import { FeatureCard } from '@/components/ui/feature-card'
 import { ConnectAccountButton } from '@/components/ConnectAccountButton'
+import { Button } from '@/components/ui/button'
 import { supabase } from '@/lib/supabase'
 
-export default function LoginPage() {
+export default function ConnectPage() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
+  const [isChecking, setIsChecking] = useState(true)
 
   // Check for authenticated user
   useEffect(() => {
     const checkUser = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.user) {
-        setUserId(session.user.id)
-      } else {
-        // If no session, redirect to sign in
+      try {
+        setIsChecking(true)
+        const { data: { session }, error } = await supabase.auth.getSession()
+        
+        if (error) {
+          console.error('Session error:', error)
+          // Redirect to signin if no session
+          router.push('/auth/signin')
+          return
+        }
+        
+        if (session?.user?.id) {
+          console.log('✅ User session found:', session.user.id)
+          setUserId(session.user.id)
+        } else {
+          console.warn('⚠️ No user in session, redirecting to signin')
+          router.push('/auth/signin')
+        }
+      } catch (error) {
+        console.error('Error checking user:', error)
         router.push('/auth/signin')
+      } finally {
+        setIsChecking(false)
       }
     }
+    
     checkUser()
-  }, [])
+  }, [router])
 
   const features = [
     {
@@ -43,6 +63,10 @@ export default function LoginPage() {
       icon: Tags
     }
   ]
+
+  const handleSkip = () => {
+    router.push('/dashboard')
+  }
 
   return (
     <div className="min-h-screen flex bg-background">
@@ -92,54 +116,68 @@ export default function LoginPage() {
         <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-transparent" />
       </div>
 
-      {/* Right Panel - Login */}
+      {/* Right Panel - Connect Accounts */}
       <div className="flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-md">
-          <div className="text-center mb-8">
-            <h2 className="text-2xl font-bold text-foreground mb-2">
-              Welcome to Onebox
-            </h2>
-            <p className="text-muted-foreground">
-              Choose your email provider to get started
-            </p>
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h2 className="text-2xl font-bold text-foreground mb-2">
+                Connect Email Accounts
+              </h2>
+              <p className="text-muted-foreground">
+                Add your email accounts to get started
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => router.back()}
+              className="ml-auto"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-4 mb-6">
             <ConnectAccountButton
               provider="google"
               userId={userId || ''}
-              disabled={loading || !userId}
+              disabled={loading || isChecking}
             />
             <ConnectAccountButton
               provider="microsoft"
               userId={userId || ''}
-              disabled={loading || !userId}
+              disabled={loading || isChecking}
             />
             <ConnectAccountButton
               provider="yahoo"
               userId={userId || ''}
-              disabled={loading || !userId}
+              disabled={loading || isChecking}
             />
             <ConnectAccountButton
               provider="imap"
               userId={userId || ''}
-              disabled={loading || !userId}
+              disabled={loading || isChecking}
             />
           </div>
 
-          <div className="mt-8 pt-6 border-t border-border">
-            <div className="flex flex-col items-center gap-4 text-sm text-muted-foreground">
-              <p className="text-center">
-                By continuing, you agree to our{' '}
-                <a href="#" className="text-primary hover:underline">Terms</a>
-                {' '}and{' '}
-                <a href="#" className="text-primary hover:underline">Privacy Policy</a>
-              </p>
-              <a href="#" className="text-primary hover:underline flex items-center gap-2">
-                <span>Need help?</span>
-                <ChevronRight className="w-4 h-4" />
-              </a>
-            </div>
+          <div className="border-t border-border pt-6">
+            <Button
+              onClick={handleSkip}
+              variant="outline"
+              className="w-full"
+            >
+              Skip for now
+            </Button>
+          </div>
+
+          <div className="mt-8 text-center text-sm text-muted-foreground">
+            <p>
+              By continuing, you agree to our{' '}
+              <a href="#" className="text-primary hover:underline">Terms</a>
+              {' '}and{' '}
+              <a href="#" className="text-primary hover:underline">Privacy Policy</a>
+            </p>
           </div>
         </div>
       </div>

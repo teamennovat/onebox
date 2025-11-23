@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Resolve auth_id to user_id
+    // Resolve auth_id to user_id
     const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .select('id')
@@ -34,23 +35,17 @@ export async function GET(request: NextRequest) {
       .single()
 
     if (userError) {
-      console.error('Error fetching user:', userError)
-      return NextResponse.json(
-        { error: 'Failed to fetch user information' },
-        { status: 500 }
-      )
+      // If auth_id doesn't resolve, try using authId as user_id directly (it might already be a UUID)
+      console.warn('⚠️ Could not resolve auth_id, will try using as-is:', { authId, error: userError.message })
     }
 
-    if (!userData) {
-      return NextResponse.json({
-        success: true,
-        data: [],
-        accountResults: [],
-      })
+    if (!userData && userError) {
+      // Try using authId as-is (assume it's a user_id UUID)
+      console.log(`ℹ️ Attempting to use authId "${authId}" as user_id directly`)
     }
 
-    const userId = userData.id
-    console.log('✓ Resolved auth_id to user_id:', { authId, userId })
+    const userId = userData?.id || authId
+    console.log('✓ Resolved auth_id to user_id:', { authId, userId, foundUser: !!userData })
 
     // Get all connected accounts for the user
     const { data: accounts, error: accountsError } = await supabaseAdmin

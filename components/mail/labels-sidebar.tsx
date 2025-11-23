@@ -46,11 +46,13 @@ export function LabelsSidebar({
 
   // Debug: Verify Supabase is configured correctly
   useEffect(() => {
-    console.log('🔧 LabelsSidebar Supabase Configuration:', {
+    console.log('🏷️ LabelsSidebar Supabase Configuration:', {
       url: process.env.NEXT_PUBLIC_SUPABASE_URL,
       keyPrefix: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.substring(0, 20) + '...',
+      grantId: grantId?.substring(0, 20) + '...',
+      isAllAccounts: grantId === '__all_accounts__'
     })
-  }, [])
+  }, [grantId])
 
   useEffect(() => {
     if (!grantId) return
@@ -62,57 +64,99 @@ export function LabelsSidebar({
       try {
         setLoading(true)
 
-        // Get all labels
-        const { data: allLabels, error: labelsError } = await supabase
-          .from('custom_labels')
-          .select('id, name, color')
-          .order('sort_order', { ascending: true })
+        // Check if this is all-accounts mode
+        const isAllAccounts = grantId === '__all_accounts__'
+        console.log(`🏷️ fetchLabelsWithCounts START:`, { grantId, isAllAccounts })
 
-        if (!isMounted) return
-        if (labelsError) {
-          console.error('Error fetching labels:', labelsError)
-          return
-        }
-
-        // Fetch ALL message_custom_labels ONCE, then filter in memory
-        const { data: allMessageLabels, error: msgError } = await supabase
-          .from('message_custom_labels')
-          .select('custom_label_id, applied_by')
-
-        if (!isMounted) return
-        if (msgError) {
-          console.error('Error fetching message labels:', msgError)
-          return
-        }
-
-        // Calculate counts in memory - ZERO additional API calls
-        const labelsWithCounts = allLabels.map((label) => {
-          const count = (allMessageLabels || []).filter((item: any) => {
-            // Check if this message_custom_label matches this label
-            if (item.custom_label_id !== label.id) return false
-
-            // Check if grant_id matches applied_by
-            // Match if: applied_by contains grantId OR applied_by is null
-            const appliedBy = item.applied_by
-            if (Array.isArray(appliedBy)) {
-              return appliedBy.includes(grantId)
-            } else if (appliedBy === null || appliedBy === undefined) {
-              // Include emails with no applied_by (legacy or system-labeled)
-              return true
-            } else if (appliedBy && appliedBy === grantId) {
-              return true
-            }
-            return false
-          }).length
-
-          return {
-            ...label,
-            count,
+        if (isAllAccounts) {
+          // All-accounts mode: get userId and call multi-account endpoint
+          const supabaseTemp = createBrowserClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+          )
+          const { data: { session }, error: sessionError } = await supabaseTemp.auth.getSession()
+          if (sessionError || !session?.user?.id) {
+            console.error(`🏷️ Failed to get session:`, sessionError)
+            setLoading(false)
+            return
           }
-        })
 
-        if (isMounted) {
-          setLabels(labelsWithCounts.filter((l) => l.count > 0))
+          console.log(`🏷️ All-accounts mode, calling labels-count endpoint with userId=${session.user.id.substring(0, 20)}...`)
+          const labelsCountUrl = `/api/accounts/labels-count?userId=${encodeURIComponent(session.user.id)}`
+          console.log(`🏷️ Request URL: ${labelsCountUrl}`)
+
+          const response = await fetch(labelsCountUrl)
+          if (!response.ok) {
+            const text = await response.text().catch(() => 'Failed to read error response')
+            console.error(`🏷️ HTTP error:`, { status: response.status, body: text.substring(0, 100) })
+            setLoading(false)
+            return
+          }
+
+          const data = await response.json()
+          console.log(`🏷️ ✅ Got response: ${data.data?.length || 0} labels with counts`)
+          console.log(`🏷️ Labels:`, data.data?.slice(0, 3).map((l: any) => ({ name: l.name, count: l.count })))
+
+          if (isMounted) {
+            setLabels(data.data?.filter((l: any) => l.count > 0) || [])
+          }
+        } else {
+          // Single-account mode: use original logic
+          console.log(`🏷️ Single-account mode, fetching from database...`)
+
+          // Get all labels
+          const { data: allLabels, error: labelsError } = await supabase
+            .from('custom_labels')
+            .select('id, name, color')
+            .order('sort_order', { ascending: true })
+
+          if (!isMounted) return
+          if (labelsError) {
+            console.error('Error fetching labels:', labelsError)
+            return
+          }
+
+          // Fetch ALL message_custom_labels ONCE, then filter in memory
+          const { data: allMessageLabels, error: msgError } = await supabase
+            .from('message_custom_labels')
+            .select('custom_label_id, applied_by')
+
+          if (!isMounted) return
+          if (msgError) {
+            console.error('Error fetching message labels:', msgError)
+            return
+          }
+
+          // Calculate counts in memory - ZERO additional API calls
+          const labelsWithCounts = allLabels.map((label) => {
+            const count = (allMessageLabels || []).filter((item: any) => {
+              // Check if this message_custom_label matches this label
+              if (item.custom_label_id !== label.id) return false
+
+              // Check if grant_id matches applied_by
+              // Match if: applied_by contains grantId OR applied_by is null
+              const appliedBy = item.applied_by
+              if (Array.isArray(appliedBy)) {
+                return appliedBy.includes(grantId)
+              } else if (appliedBy === null || appliedBy === undefined) {
+                // Include emails with no applied_by (legacy or system-labeled)
+                return true
+              } else if (appliedBy && appliedBy === grantId) {
+                return true
+              }
+              return false
+            }).length
+
+            return {
+              ...label,
+              count,
+            }
+          })
+
+          if (isMounted) {
+            console.log(`🏷️ ✅ Got ${labelsWithCounts.filter(l => l.count > 0).length} labels with counts`)
+            setLabels(labelsWithCounts.filter((l) => l.count > 0))
+          }
         }
       } catch (error) {
         console.error('Error fetching labels:', error)

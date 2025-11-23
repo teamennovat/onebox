@@ -37,7 +37,7 @@ export default function SignInPage() {
       await new Promise(resolve => setTimeout(resolve, 100))
 
       // Force a full page navigation to ensure middleware picks up the new session
-      window.location.href = '/dashboard'
+      window.location.href = '/connect'
     } catch (error) {
       console.error('Sign in error:', error)
       setError(error instanceof Error ? error.message : 'Failed to sign in')

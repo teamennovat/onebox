@@ -16,6 +16,7 @@ import {
   Trash2,
   Users2,
   X,
+  MoreVertical,
 } from "lucide-react"
 
 import { MailListSkeleton } from "./mail-list-skeleton"
@@ -81,6 +82,15 @@ export function Mail({
   const [sidebarLoading, setSidebarLoading] = React.useState(false)
   const [initialSidebarLoad, setInitialSidebarLoad] = React.useState(true)
   const [mailboxType, setMailboxType] = React.useState<string>('INBOX')
+  
+  // Log component startup
+  React.useEffect(() => {
+    console.log(`🚀 Mail Component Initialized:`, {
+      accountsCount: accounts?.length,
+      defaultLayout,
+      timestamp: new Date().toISOString()
+    })
+  }, [])
   const [dateFilterFrom, setDateFilterFrom] = React.useState<number | null>(null)
   const [dateFilterTo, setDateFilterTo] = React.useState<number | null>(null)
   const [filters, setFilters] = React.useState<EmailFilters>({})
@@ -102,6 +112,12 @@ export function Mail({
   const [isPreloadingNextBatch, setIsPreloadingNextBatch] = React.useState(false)
   // State for all-accounts pagination
   const [allAccountsPage, setAllAccountsPage] = React.useState(0)
+  
+  // State for labeled emails pagination and prefetching (all-accounts mode only)
+  const [labeledEmailsPage, setLabeledEmailsPage] = React.useState(1)
+  const [labeledEmailsCache, setLabeledEmailsCache] = React.useState<Map<number, any[]>>(new Map())
+  const [labeledEmailsTotalCount, setLabeledEmailsTotalCount] = React.useState(0)
+  const [labeledEmailsMaxFetchedPage, setLabeledEmailsMaxFetchedPage] = React.useState(0)
   
   // Track screen size for responsive layout
   React.useEffect(() => {
@@ -753,92 +769,126 @@ export function Mail({
 
   // Fetch folders for sidebar counts when grant changes or a message is moved
   const fetchFolders = React.useCallback(async (isBackgroundRefresh = true) => {
+    console.log(`📁 fetchFolders CALLED:`, { currentGrantId, exists: !!currentGrantId, isBackgroundRefresh })
+    
     if (!currentGrantId) {
+      console.log(`📁 ⚠️  fetchFolders: No currentGrantId, cannot fetch folders`)
       setSidebarFolders([])
       return
     }
     
+    const isAllAccounts = currentGrantId === '__all_accounts__'
+    console.log(`📁 ════════════════════════════════════════════════════════`)
+    console.log(`📁 fetchFolders START:`, { 
+      currentGrantId: currentGrantId.substring(0, 30) + '...', 
+      isAllAccounts, 
+      isBackgroundRefresh,
+      timestamp: new Date().toISOString()
+    })
+    
     // Only show loading state on initial load, NOT on background refreshes
     if (initialSidebarLoad && !isBackgroundRefresh) {
+      console.log(`📁 Setting loading state (initial load)`)
       setSidebarLoading(true)
     }
-    // Implement a small retry/backoff for transient 5xx errors from provider
+
     const maxAttempts = 3
     let attempt = 0
     let lastErr: any = null
+
     while (attempt < maxAttempts) {
       attempt += 1
       try {
         let foldersUrl = ''
-        if (currentGrantId === "__all_accounts__") {
-          // For all-accounts, we need to get userId from session
+
+        if (isAllAccounts) {
+          // For all-accounts: use the NEW folders-count endpoint
           const supabase = createBrowserClient(
             process.env.NEXT_PUBLIC_SUPABASE_URL!,
             process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
           )
           const { data: { session }, error: sessionError } = await supabase.auth.getSession()
           if (sessionError || !session?.user?.id) {
+            console.error(`📁 ❌ Failed to get session:`, sessionError)
             throw new Error('Not authenticated')
           }
-          foldersUrl = `/api/accounts/all-folders?userId=${encodeURIComponent(session.user.id)}`
+          foldersUrl = `/api/accounts/folders-count?userId=${encodeURIComponent(session.user.id)}`
+          console.log(`📁 All-accounts mode, userId=${session.user.id.substring(0, 20)}...`)
         } else {
+          // For single account: use original endpoint
           foldersUrl = `/api/folders?grantId=${currentGrantId}`
+          console.log(`📁 Single-account mode, grantId=${currentGrantId.substring(0, 30)}...`)
         }
-        
+
+        console.log(`📁 Attempt ${attempt}/${maxAttempts}: Fetching ${foldersUrl.substring(0, 60)}...`)
         const res = await fetch(foldersUrl)
+
         if (!res.ok) {
           const text = await res.text().catch(() => 'Failed to read error response')
-          console.error('Failed to fetch folders:', {
-            status: res.status,
-            body: text,
-            grantId: currentGrantId
-          })
-          // For client-side display/debugging, throw and allow retry for 5xx
-          const err = new Error(`Failed to fetch folders: ${res.status} ${text}`)
+          console.error(`📁 ❌ HTTP error:`, { status: res.status, url: foldersUrl, body: text.substring(0, 100) })
+          const err = new Error(`Failed to fetch folders: ${res.status}`)
           ;(err as any).status = res.status
           throw err
         }
+
         const data = await res.json()
-      
-      // Ensure we have all system folders with at least 0 count
-      const systemFolders = ['INBOX', 'SENT', 'IMPORTANT', 'DRAFT', 'SPAM', 'TRASH', 'STARRED']
-      const folders = Array.isArray(data.data) ? data.data : []
-      
-      // Add missing system folders with 0 count
-      const normalizedFolders = [...folders]
-      systemFolders.forEach(folderId => {
-        if (!normalizedFolders.some(f => String(f.id).toUpperCase() === folderId)) {
-          normalizedFolders.push({
-            id: folderId,
-            name: folderId.charAt(0) + folderId.slice(1).toLowerCase(),
-            total_count: 0,
-            unread_count: 0,
-            system_folder: true
-          })
-        }
-      })
-      
+        console.log(`📁 ✅ Response received: ${data.data?.length || 0} folders`)
+        
+        const folders = Array.isArray(data.data) ? data.data : []
+        console.log(`📁 Folder details:`, folders.slice(0, 3).map((f: any) => ({
+          id: f.id,
+          name: f.name,
+          total_count: f.total_count,
+          unread_count: f.unread_count
+        })))
+
+        // Ensure we have all system folders with at least 0 count
+        const systemFolders = ['INBOX', 'SENT', 'IMPORTANT', 'DRAFT', 'SPAM', 'TRASH', 'STARRED']
+        
+        // Add missing system folders with 0 count
+        const normalizedFolders = [...folders]
+        systemFolders.forEach(folderId => {
+          if (!normalizedFolders.some(f => String(f.id).toUpperCase() === folderId)) {
+            normalizedFolders.push({
+              id: folderId,
+              name: folderId.charAt(0) + folderId.slice(1).toLowerCase(),
+              total_count: 0,
+              unread_count: 0,
+              system_folder: true
+            })
+          }
+        })
+
+        console.log(`📁 After normalization: ${normalizedFolders.length} folders`)
+        console.log(`📁 Normalized folders:`, normalizedFolders.slice(0, 3))
+
         setSidebarFolders(normalizedFolders)
         lastErr = null
+        console.log(`📁 ✅ fetchFolders SUCCESS: Set ${normalizedFolders.length} folders`)
+        console.log(`📁 ════════════════════════════════════════════════════════`)
         break
       } catch (e: any) {
         lastErr = e
-        // If client error (4xx) don't retry
         const status = (e && e.status) || 0
-        if (status >= 400 && status < 500) break
-        // else wait and retry (exponential backoff)
+        console.error(`📁 ❌ Attempt ${attempt} failed:`, e.message, { status })
+        if (status >= 400 && status < 500) {
+          console.error(`📁 Client error (4xx), not retrying`)
+          break
+        }
         const waitMs = 200 * Math.pow(2, attempt - 1)
-        // If the grant changed during retries, abort
         if (!currentGrantId) break
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, waitMs))
+        if (attempt < maxAttempts) {
+          console.log(`📁 Retrying in ${waitMs}ms...`)
+          await new Promise((r) => setTimeout(r, waitMs))
+        }
       }
     }
+
     if (lastErr) {
-      console.error('Folder fetch error:', lastErr)
-      // Keep existing folders on error to prevent UI flicker
+      console.error(`📁 ❌ Final error after ${maxAttempts} attempts:`, lastErr.message)
       setSidebarFolders(prev => prev.length ? prev : [])
     }
+
     setSidebarLoading(false)
     setInitialSidebarLoad(false)
   }, [currentGrantId])
@@ -925,21 +975,30 @@ export function Mail({
 
   // Refresh handler for labeled emails
   const handleRefreshLabeledEmails = React.useCallback(async () => {
-    if (!selectedLabelData || !currentGrantId || !currentEmailAccountId) {
+    if (!selectedLabelData) {
       return
     }
 
     try {
-      const response = await fetch(
-        `/api/labels/${selectedLabelData.labelId}/emails?grantId=${encodeURIComponent(currentGrantId)}&emailAccountId=${encodeURIComponent(currentEmailAccountId)}`,
-        {
-          method: 'GET',
-          credentials: 'include',
-        }
-      )
+      // Determine if this is all-accounts or single-account mode
+      const isAllAccounts = currentGrantId === '__all_accounts__'
+
+      let url: string
+      if (isAllAccounts) {
+        // All-accounts mode: fetch from backend endpoint with all-accounts support
+        url = `/api/labels/${selectedLabelData.labelId}/emails?grantId=${encodeURIComponent(currentGrantId || '')}&page=1`
+      } else {
+        // Single-account mode: use existing logic
+        url = `/api/labels/${selectedLabelData.labelId}/emails?grantId=${encodeURIComponent(currentGrantId || '')}&emailAccountId=${encodeURIComponent(currentEmailAccountId || '')}`
+      }
+
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+      })
 
       const result = await response.json()
-      const { data, success } = result
+      const { data, success, totalCount, totalPages } = result
 
       if (!success) {
         console.error('Error refreshing labeled emails:', result.error)
@@ -973,9 +1032,20 @@ export function Mail({
         labels: [selectedLabelData.labelName],
         grant_id: item.mail_details?.grant_id || currentGrantId,
         labelId: selectedLabelData.labelId,
-        emailAccountId: currentEmailAccountId,
+        emailAccountId: item.email_account_id || currentEmailAccountId,
         mailDetails: item.mail_details,
       }))
+
+      if (isAllAccounts) {
+        // For all-accounts mode, reset cache and pagination
+        console.log('🔄 Refreshing labeled emails for all-accounts mode')
+        const newCache = new Map()
+        newCache.set(1, emails)
+        setLabeledEmailsCache(newCache)
+        setLabeledEmailsTotalCount(totalCount || 0)
+        setLabeledEmailsMaxFetchedPage(1)
+        setLabeledEmailsPage(1)
+      }
 
       setSelectedLabelData(prev => {
         if (!prev) return prev
@@ -991,6 +1061,125 @@ export function Mail({
       console.error('Error in handleRefreshLabeledEmails:', error)
     }
   }, [selectedLabelData, currentGrantId, currentEmailAccountId])
+
+  // Prefetch labeled emails in background (all-accounts mode only)
+  const prefetchLabeledEmails = React.useCallback(async (pageNum: number) => {
+    if (!selectedLabelData || currentGrantId !== '__all_accounts__') {
+      return
+    }
+
+    // Don't prefetch if already fetched
+    if (labeledEmailsCache.has(pageNum)) {
+      return
+    }
+
+    // Don't prefetch if we're already at or beyond total pages
+    const pageSize = 50
+    const totalPages = Math.ceil(labeledEmailsTotalCount / pageSize)
+    if (pageNum > totalPages) {
+      return
+    }
+
+    try {
+      console.log(`🔄 [Background] Prefetching labeled emails page ${pageNum}...`)
+      const url = `/api/labels/${selectedLabelData.labelId}/emails?grantId=${encodeURIComponent(currentGrantId)}&page=${pageNum}`
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+      })
+
+      const result = await response.json()
+      const { data, success } = result
+
+      if (!success) {
+        console.warn(`⚠️ Failed to prefetch page ${pageNum}:`, result.error)
+        return
+      }
+
+      // Transform and cache
+      const emails = (data || []).map((item: any) => ({
+        id: item.message_id,
+        name: item.mail_details?.from?.[0]?.name || item.mail_details?.from?.[0]?.email || 'Unknown',
+        email: item.mail_details?.from?.[0]?.email || '',
+        subject: item.mail_details?.subject || '(No subject)',
+        text: item.mail_details?.body || item.mail_details?.snippet || '',
+        html: item.mail_details?.html,
+        body: item.mail_details?.body,
+        thread_id: item.mail_details?.thread_id,
+        from: item.mail_details?.from,
+        to: item.mail_details?.to,
+        cc: item.mail_details?.cc,
+        bcc: item.mail_details?.bcc,
+        reply_to: item.mail_details?.reply_to,
+        attachments: item.mail_details?.attachments || [],
+        date: (() => {
+          const dateValue = item.mail_details?.date;
+          if (!dateValue) return new Date().toISOString();
+          if (typeof dateValue === 'string') return dateValue;
+          if (typeof dateValue === 'number') return new Date(dateValue * 1000).toISOString();
+          return new Date().toISOString();
+        })(),
+        read: !item.mail_details?.unread,
+        labels: [selectedLabelData.labelName],
+        grant_id: item.mail_details?.grant_id || currentGrantId,
+        labelId: selectedLabelData.labelId,
+        emailAccountId: item.email_account_id || currentEmailAccountId,
+        mailDetails: item.mail_details,
+      }))
+
+      // Add to cache
+      setLabeledEmailsCache(prev => {
+        const newCache = new Map(prev)
+        newCache.set(pageNum, emails)
+        return newCache
+      })
+
+      // Update max fetched page
+      setLabeledEmailsMaxFetchedPage(prev => Math.max(prev, pageNum))
+
+      console.log(`✅ Prefetched page ${pageNum} with ${emails.length} emails`)
+    } catch (error) {
+      console.error(`❌ Error prefetching page ${pageNum}:`, error)
+    }
+  }, [selectedLabelData, currentGrantId, currentEmailAccountId, labeledEmailsCache, labeledEmailsTotalCount])
+
+  // Handle labeled emails pagination with smart prefetching
+  const handleLabeledEmailsPagination = React.useCallback((newPage: number) => {
+    const pageSize = 50
+    const totalPages = Math.ceil(labeledEmailsTotalCount / pageSize)
+
+    // Validate page
+    if (newPage < 1 || newPage > totalPages) {
+      return
+    }
+
+    console.log(`📄 Paginating labeled emails to page ${newPage}`)
+
+    // Get emails from cache or selectedLabelData
+    if (labeledEmailsCache.has(newPage)) {
+      const cachedEmails = labeledEmailsCache.get(newPage) || []
+      setSelectedLabelData(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          emails: cachedEmails
+        }
+      })
+      console.log(`✅ Using cached emails for page ${newPage}`)
+    }
+
+    // Update current page
+    setLabeledEmailsPage(newPage)
+
+    // Smart prefetching: prefetch next batch if approaching boundary
+    // Prefetch every 4 pages (200 emails): pages 5, 9, 13, etc.
+    if (newPage % 4 === 1 && newPage > 1) {
+      const prefetchPage = newPage + 4
+      console.log(`🔄 Triggering prefetch for page ${prefetchPage} (user is on page ${newPage})`)
+      prefetchLabeledEmails(prefetchPage)
+    }
+  }, [labeledEmailsCache, labeledEmailsTotalCount, prefetchLabeledEmails])
 
   // When account changes: (1) reset state, (2) fetch folders, (3) then fetch emails for INBOX
   React.useEffect(() => {
@@ -1025,12 +1214,22 @@ export function Mail({
       setIsPreloadingNextBatch(false)
       setAllAccountsPage(0)
       
-      // Fetch ONLY page 0 (200 emails) - no prefetching of pages 1,2,3
+      // Fetch folders and emails for all accounts
       setTimeout(() => {
         if (currentGrantId === "__all_accounts__") {
-          isAccountChangeInProgressRef.current = false
-          // Single fetch: page 0 only
-          void fetchAllAccountsEmailsByFolder('INBOX', 0, false)
+          console.log(`👤 [ALL ACCOUNTS MODE] Fetching folders...`)
+          // Fetch folders FIRST for all accounts
+          void fetchFolders().then(() => {
+            console.log(`👤 [ALL ACCOUNTS MODE] Folders fetched, now fetching emails...`)
+            isAccountChangeInProgressRef.current = false
+            // Single fetch: page 0 only
+            void fetchAllAccountsEmailsByFolder('INBOX', 0, false)
+          }).catch((err) => {
+            console.error(`👤 [ALL ACCOUNTS MODE] Failed to fetch folders:`, err)
+            isAccountChangeInProgressRef.current = false
+            // Still fetch emails even if folders fail
+            void fetchAllAccountsEmailsByFolder('INBOX', 0, false)
+          })
         }
       }, 150)
     } else {
@@ -1206,6 +1405,13 @@ export function Mail({
   }, [])
 
   const handleAccountChange = React.useCallback((grantId: string) => {
+    const isAllAccounts = grantId === '__all_accounts__'
+    console.log(`👤 [ACCOUNT CHANGE] Selected:`, { 
+      grantId: grantId.substring(0, 20) + '...', 
+      isAllAccounts,
+      timestamp: new Date().toISOString()
+    })
+    
     setCurrentGrantId(grantId)
     // Reset batch pagination when account changes
     setCurrentBatch(0)
@@ -1214,13 +1420,15 @@ export function Mail({
     // Fetch the email account ID from Supabase based on grant_id
     const fetchAccountId = async () => {
       try {
+        console.log(`👤 Fetching account ID for grantId...`)
         const response = await fetch(`/api/accounts?grantId=${grantId}`)
         const data = await response.json()
         if (data.account && data.account.id) {
+          console.log(`👤 Account ID fetched: ${data.account.id}`)
           setCurrentEmailAccountId(data.account.id)
         }
       } catch (error) {
-        console.error('Error fetching account ID:', error)
+        console.error('❌ Error fetching account ID:', error)
       }
     }
     
@@ -1274,6 +1482,22 @@ export function Mail({
       folderId: f.id
     })).sort((a: any, b: any) => (b.total_count || 0) - (a.total_count || 0))
     : []
+
+  // Log folder links for debugging
+  if (folderLinks.length > 0) {
+    console.log(`📁 ════════════════════════════════════════════════════════`)
+    console.log(`📁 [SIDEBAR] Rendering ${folderLinks.length} folder links`)
+    console.log(`📁 Current Mode: ${currentGrantId === '__all_accounts__' ? '🌐 ALL ACCOUNTS' : '👤 SINGLE ACCOUNT'}`)
+    console.log(`📁 Folder Display:`, folderLinks.slice(0, 8).map(f => `${f.title}(${f.label})`))
+    console.log(`📁 First 5 folders:`, folderLinks.slice(0, 5).map(f => ({
+      title: f.title,
+      label: f.label,
+      folderId: f.folderId
+    })))
+    console.log(`📁 ════════════════════════════════════════════════════════`)
+  } else {
+    console.log(`📁 ⚠️  No folder links to render`)
+  }
 
   // Primary system folders to show (in descending order by count)
   const primaryLinksFromFolders = folderLinks.filter((l: any) => primaryFolderIds.has(String(l.folderId).toUpperCase()))
@@ -1403,9 +1627,12 @@ export function Mail({
                 onDraftEdit={setDraftToEdit}
                 onMailboxTypeChange={(folderId) => {
                   const folderToUse = folderId || 'INBOX'
+                  console.log(`📂 [USER ACTION] Folder clicked:`, { folderId, folderToUse, currentGrantId, isAllAccounts: currentGrantId === '__all_accounts__' })
                   if (lastFolderChangeRef.current?.grantId === currentGrantId && lastFolderChangeRef.current?.folder === folderToUse) {
+                    console.log(`📂 Ignoring duplicate folder change`)
                     return
                   }
+                  console.log(`📂 Processing folder change...`)
                   lastFolderChangeRef.current = { grantId: currentGrantId!, folder: folderToUse }
                   setMailboxType(folderToUse)
                   setSelectedLabelData(null)
@@ -1430,7 +1657,7 @@ export function Mail({
               <Separator />
 
               {/* Labels / Custom Supabase Labels */}
-              {currentGrantId && currentEmailAccountId && (
+              {currentGrantId && (currentEmailAccountId || currentGrantId === "__all_accounts__") && (
                 <CustomLabels 
                   emailAccountId={currentEmailAccountId}
                   grantId={currentGrantId}
@@ -1440,11 +1667,32 @@ export function Mail({
                   onMailboxTypeChange={(mailboxType) => {
                     setMailboxType(mailboxType)
                   }}
-                  onLabelSelect={(labelId, labelName, emails, labelColor) => {
-                    console.log('📬 CustomLabels callback received:', { labelId, labelName, labelColor, emailCount: emails.length })
+                  onLabelSelect={(labelId, labelName, emails, labelColor, totalCount = emails.length) => {
+                    console.log('📬 CustomLabels callback received:', { labelId, labelName, labelColor, emailCount: emails.length, totalCount, isAllAccounts: currentGrantId === '__all_accounts__' })
                     setLabelLoadingId(labelId)
                     setSelectedLabelData({ labelId, labelName, labelColor, emails })
                     setShowLabeledEmails(true)
+                    
+                    // Setup pagination for all-accounts mode
+                    if (currentGrantId === '__all_accounts__') {
+                      console.log('🔄 Setting up pagination cache for all-accounts labeled emails')
+                      const newCache = new Map()
+                      newCache.set(1, emails)
+                      setLabeledEmailsCache(newCache)
+                      setLabeledEmailsTotalCount(totalCount)
+                      setLabeledEmailsMaxFetchedPage(1)
+                      setLabeledEmailsPage(1)
+                      
+                      // Prefetch page 5 if we have more than 200 emails
+                      if (totalCount > 200) {
+                        console.log('🔄 Prefetching page 5 for all-accounts labeled emails')
+                        setTimeout(() => {
+                          const selectedLabel = { labelId, labelName, labelColor, emails }
+                          prefetchLabeledEmails(5)
+                        }, 100)
+                      }
+                    }
+                    
                     setLabelLoadingId(null)
                   }}
                 />
@@ -1461,14 +1709,19 @@ export function Mail({
                 )}>
                   {!isCollapsed ? (
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <div className="w-10 h-10 bg-gradient-to-br from-primary to-primary/70 rounded-full flex items-center justify-center text-white text-xs font-bold">
-                          {accounts[0]?.email?.charAt(0).toUpperCase() || 'U'}
+                      <div className="flex items-center gap-2 justify-between">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <div className="w-10 h-10 bg-gradient-to-br from-primary to-primary/70 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                            {accounts[0]?.email?.charAt(0).toUpperCase() || 'U'}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{accounts[0]?.label || 'Account'}</p>
+                            <p className="text-xs text-muted-foreground truncate">{accounts[0]?.email}</p>
+                          </div>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{accounts[0]?.label || 'Account'}</p>
-                          <p className="text-xs text-muted-foreground truncate">{accounts[0]?.email}</p>
-                        </div>
+                        <button className="p-1 hover:bg-accent rounded-md transition-colors flex-shrink-0" title="Account options">
+                          <MoreVertical className="w-4 h-4 text-muted-foreground" />
+                        </button>
                       </div>
                       <div className="bg-primary/15 rounded-lg p-3 border border-primary/20">
                         <p className="text-xs font-semibold mb-1">Upgrade to Pro</p>
@@ -1538,31 +1791,93 @@ export function Mail({
                   <MailListSkeleton />
                 </div>
               ) : selectedLabelData !== null ? (
-                // Show labeled emails
-                <MailList
-                  items={selectedLabelData.emails}
-                  selectedGrantId={currentGrantId}
-                  mailboxType={`label:${selectedLabelData.labelName}`}
-                  initialNextCursor={null}
-                  initialHasMore={false}
-                  setItems={(updater) => {
-                    // Update selectedLabelData when emails are modified (e.g., marked as read)
-                    setSelectedLabelData(prev => {
-                      if (!prev) return prev
-                      return {
-                        ...prev,
-                        emails: typeof updater === 'function' ? updater(prev.emails) : updater
-                      }
-                    })
-                    // Trigger label count refresh to update unread counts
-                    setLabelCountRefreshTrigger(prev => prev + 1)
-                  }}
-                  onFolderChange={handleFolderChange}
-                  onRefresh={handleRefreshLabeledEmails}
-                  onPaginate={async (pageToken: string) => {
-                    // No pagination for labeled emails
-                  }}
-                />
+                // Show labeled emails with pagination (for all-accounts mode)
+                <div className="flex flex-col h-full">
+                  <MailList
+                    items={selectedLabelData.emails}
+                    selectedGrantId={currentGrantId}
+                    mailboxType={`label:${selectedLabelData.labelName}`}
+                    initialNextCursor={null}
+                    initialHasMore={false}
+                    setItems={(updater) => {
+                      // Update selectedLabelData when emails are modified (e.g., marked as read)
+                      setSelectedLabelData(prev => {
+                        if (!prev) return prev
+                        return {
+                          ...prev,
+                          emails: typeof updater === 'function' ? updater(prev.emails) : updater
+                        }
+                      })
+                      // Trigger label count refresh to update unread counts
+                      setLabelCountRefreshTrigger(prev => prev + 1)
+                    }}
+                    onFolderChange={handleFolderChange}
+                    onRefresh={handleRefreshLabeledEmails}
+                    onPaginate={async (pageToken: string) => {
+                      // No pagination for labeled emails (handled separately)
+                    }}
+                  />
+                  
+                  {/* Pagination controls for all-accounts labeled emails */}
+                  {currentGrantId === '__all_accounts__' && labeledEmailsTotalCount > 50 && (
+                    <div className="flex items-center justify-center gap-2 p-4 border-t bg-background">
+                      <button
+                        onClick={() => handleLabeledEmailsPagination(labeledEmailsPage - 1)}
+                        disabled={labeledEmailsPage <= 1}
+                        className="px-2 py-1 text-sm font-medium rounded hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        ← Previous
+                      </button>
+                      
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: Math.ceil(labeledEmailsTotalCount / 50) }).map((_, i) => {
+                          const pageNum = i + 1
+                          const pageSize = 50
+                          const start = (pageNum - 1) * pageSize + 1
+                          const end = Math.min(pageNum * pageSize, labeledEmailsTotalCount)
+                          
+                          // Show first 3 pages, last page, and current page area
+                          const shouldShow = pageNum <= 3 || pageNum === Math.ceil(labeledEmailsTotalCount / 50) || Math.abs(pageNum - labeledEmailsPage) <= 1
+                          
+                          if (!shouldShow && pageNum === 4) {
+                            return <span key="ellipsis" className="px-1 text-muted-foreground">...</span>
+                          }
+                          
+                          if (!shouldShow) {
+                            return null
+                          }
+                          
+                          return (
+                            <button
+                              key={pageNum}
+                              onClick={() => handleLabeledEmailsPagination(pageNum)}
+                              title={`Page ${pageNum} (${start}-${end})`}
+                              className={`px-2.5 py-1 text-sm font-medium rounded transition-colors ${
+                                labeledEmailsPage === pageNum
+                                  ? 'bg-primary text-primary-foreground'
+                                  : 'hover:bg-accent'
+                              }`}
+                            >
+                              {pageNum}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      
+                      <button
+                        onClick={() => handleLabeledEmailsPagination(labeledEmailsPage + 1)}
+                        disabled={labeledEmailsPage >= Math.ceil(labeledEmailsTotalCount / 50)}
+                        className="px-2 py-1 text-sm font-medium rounded hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Next →
+                      </button>
+                      
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        Page {labeledEmailsPage} of {Math.ceil(labeledEmailsTotalCount / 50)} ({labeledEmailsTotalCount} total)
+                      </span>
+                    </div>
+                  )}
+                </div>
               ) : (
                 // Show folder emails (normal flow)
                 <MailListSection

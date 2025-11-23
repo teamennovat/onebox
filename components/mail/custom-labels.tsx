@@ -25,7 +25,7 @@ interface LabelWithCount extends CustomLabel {
 interface CustomLabelsProps {
   emailAccountId?: string
   grantId?: string
-  onLabelSelect?: (labelId: string, labelName: string, emails: any[], labelColor: string) => void
+  onLabelSelect?: (labelId: string, labelName: string, emails: any[], labelColor: string, totalCount?: number) => void
   isCollapsed?: boolean
   isLoadingLabel?: boolean
   refreshTrigger?: number
@@ -62,20 +62,34 @@ export function CustomLabels({
         console.log('🏷️ CustomLabels: fetchLabelsWithCounts() START')
         setLoading(true)
 
-        // For all-accounts mode, use the all-labels endpoint
+        // For all-accounts mode, use the NEW all-labels endpoint
         if (grantId === '__all_accounts__') {
+          console.log(`🏷️  All-accounts mode detected, fetching shared labels...`)
           const { data: { session }, error: sessionError } = await supabase.auth.getSession()
           
           if (sessionError || !session?.user?.id) {
-            console.error('❌ Failed to get auth session')
+            console.error('❌ Failed to get auth session:', sessionError)
+            console.error('   Session data:', session?.user?.id ? 'exists' : 'null')
             setLoading(false)
             return
           }
 
-          // Call the all-labels API endpoint
-          const response = await fetch(`/api/accounts/all-labels?userId=${encodeURIComponent(session.user.id)}`)
+          console.log(`🏷️  Session obtained, userId: ${session.user.id}`)
+          
+          // Call the NEW labels-count API endpoint
+          const labelsUrl = `/api/accounts/labels-count?userId=${encodeURIComponent(session.user.id)}`
+          console.log(`🏷️  Calling: ${labelsUrl}`)
+          
+          const response = await fetch(labelsUrl)
+          
+          console.log(`🏷️  Response status: ${response.status} ${response.statusText}`)
+          
           if (!response.ok) {
-            console.error('❌ Error fetching all labels:', response.status)
+            const errorText = await response.text().catch(() => 'Failed to read error')
+            console.error('❌ Error fetching labels count:', { 
+              status: response.status, 
+              error: errorText.substring(0, 200) 
+            })
             setLoading(false)
             return
           }
@@ -83,70 +97,111 @@ export function CustomLabels({
           const result = await response.json()
           const allLabels = result.data || []
 
-          if (!isMounted) return
+          if (!isMounted) {
+            console.log(`🏷️  Component unmounted, skipping state update`)
+            return
+          }
 
-          console.log('✅ Fetched all labels:', allLabels?.length)
-          console.log('📊 All labels with counts:', allLabels.map((l: any) => ({ name: l.name, count: l.count })))
+          console.log(`✅ Labels response received:`, { 
+            count: allLabels?.length,
+            firstLabel: allLabels?.[0] ? { id: allLabels[0].id, name: allLabels[0].name, count: allLabels[0].count } : 'none'
+          })
+          console.log(`🏷️  ════════════════════════════════════════════════════════`)
+          console.log(`🏷️  [SIDEBAR] Rendering ${allLabels?.length} labels`)
+          console.log(`🏷️  Labels Summary:`, allLabels.slice(0, 8).map((l: any) => `${l.name}(${l.count})`).join(' | '))
+          console.log(`🏷️  First 5 labels:`, allLabels.slice(0, 5).map((l: any) => ({ 
+            name: l.name, 
+            count: l.count,
+            color: l.color
+          })))
 
           setLabels(allLabels || [])
           setLoading(false)
+          console.log(`✅ Labels state updated with ${allLabels?.length} labels`)
+          console.log(`🏷️  ════════════════════════════════════════════════════════`)
           return
         }
 
         // For single account mode, fetch from Supabase directly
+        console.log(`🏷️  Single-account mode: grantId=${grantId}, emailAccountId=${emailAccountId}`)
+        
         const { data: allLabels, error: labelsError } = await supabase
           .from('custom_labels')
           .select('id, name, color, sort_order')
           .order('sort_order', { ascending: true })
 
-        if (!isMounted) return
+        if (!isMounted) {
+          console.log(`🏷️  Component unmounted during Supabase query`)
+          return
+        }
+        
         if (labelsError) {
-          console.error('❌ Error fetching labels:', labelsError)
+          console.error('❌ Error fetching custom_labels from Supabase:', labelsError)
           return
         }
 
-        console.log('✅ Fetched custom_labels:', allLabels?.length)
+        console.log(`✅ Fetched ${allLabels?.length} custom_labels from Supabase`)
+        console.log('📊 DEBUG: Labels from DB:', allLabels?.slice(0, 3).map((l: any) => ({ 
+          id: l.id,
+          name: l.name,
+          color: l.color
+        })))
 
         // If no grantId provided, just show labels with 0 count
         if (!grantId || !emailAccountId) {
-          console.log('⚠️ No grantId or emailAccountId, showing labels with 0 count')
+          console.log('⚠️  No grantId or emailAccountId, showing labels with 0 count')
           const labelsWithZeroCount = (allLabels || []).map(label => ({ ...label, count: 0 }))
           if (isMounted) {
             setLabels(labelsWithZeroCount)
+            console.log(`✅ Set ${labelsWithZeroCount.length} labels with zero count`)
           }
           setLoading(false)
           return
         }
 
         // For single account mode, fetch message counts from backend API
+        console.log(`🔄 Fetching message counts for ${allLabels?.length} labels...`)
+        
         const labelsWithCounts = await Promise.all(
           (allLabels || []).map(async (label: any) => {
             try {
-              // Use the API endpoint to get message count for this label and account
-              const response = await fetch(
-                `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&emailAccountId=${encodeURIComponent(emailAccountId)}`,
-                { method: 'GET', credentials: 'include' }
-              )
+              const countUrl = `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&emailAccountId=${encodeURIComponent(emailAccountId)}`
+              
+              const response = await fetch(countUrl, { 
+                method: 'GET', 
+                credentials: 'include' 
+              })
+
+              if (!response.ok) {
+                console.warn(`⚠️  Count endpoint returned ${response.status} for label "${label.name}"`)
+                return { ...label, count: 0 }
+              }
 
               const result = await response.json()
               const emails = result.data || []
-
-              // For single account, just return the total count of messages with this label
               const count = emails.length
 
-              console.log(`📊 Label "${label.name}": ${count} messages`)
+              console.log(`✅ Label "${label.name}": ${count} messages`)
               return { ...label, count }
             } catch (err) {
-              console.error(`❌ Error fetching count for label ${label.id}:`, err)
+              console.error(`❌ Error fetching count for label "${label.id}":`, err)
               return { ...label, count: 0 }
             }
           })
         )
 
-        console.log('📊 labelsWithCounts:', labelsWithCounts)
+        console.log(`✅ Received counts for all labels:`, labelsWithCounts.slice(0, 3).map((l: any) => ({
+          name: l.name,
+          count: l.count
+        })))
+        console.log(`🏷️  ════════════════════════════════════════════════════════`)
+        console.log(`🏷️  [SIDEBAR] Rendering ${labelsWithCounts.length} labels`)
+        console.log(`🏷️  Labels Summary:`, labelsWithCounts.map((l: any) => `${l.name}(${l.count})`).join(' | '))
 
         if (isMounted) {
           setLabels(labelsWithCounts)
+          console.log(`✅ Labels state updated with ${labelsWithCounts.length} items`)
+          console.log(`🏷️  ════════════════════════════════════════════════════════`)
         }
       } catch (error) {
         console.error('❌ Error in fetchLabelsWithCounts:', error)
@@ -167,7 +222,7 @@ export function CustomLabels({
   const handleLabelClick = async (label: LabelWithCount) => {
     try {
       // If no grantId, just update selection without fetching
-      if (!grantId || !emailAccountId) {
+      if (!grantId || (!emailAccountId && grantId !== '__all_accounts__')) {
         setSelectedLabelId(label.id)
         if (onMailboxTypeChange) {
           onMailboxTypeChange(`label:${label.id}`)
@@ -178,13 +233,19 @@ export function CustomLabels({
         return
       }
 
-      const response = await fetch(
-        `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&emailAccountId=${encodeURIComponent(emailAccountId)}`,
-        {
-          method: 'GET',
-          credentials: 'include',
-        }
-      )
+      // Build URL based on mode
+      let url: string
+      if (grantId === '__all_accounts__') {
+        console.log('🏷️ All-accounts label click: fetching emails for', label.name)
+        url = `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&page=1`
+      } else {
+        url = `/api/labels/${label.id}/emails?grantId=${encodeURIComponent(grantId)}&emailAccountId=${encodeURIComponent(emailAccountId || '')}&page=1`
+      }
+
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+      })
 
       const result = await response.json()
       const { data, success } = result
@@ -196,10 +257,10 @@ export function CustomLabels({
       }
 
       if (!data || data.length === 0) {
-        console.warn('⚠️ No emails found for this label and grant_id combination', { labelId: label.id, grantId })
+        console.warn('⚠️ No emails found for this label', { labelId: label.id, grantId, isAllAccounts: grantId === '__all_accounts__' })
         setSelectedLabelId(label.id)
         if (onLabelSelect) {
-          onLabelSelect(label.id, label.name, [], label.color)
+          onLabelSelect(label.id, label.name, [], label.color, 0)
         }
         if (onMailboxTypeChange) {
           onMailboxTypeChange(`label:${label.id}`)
@@ -207,7 +268,7 @@ export function CustomLabels({
         return
       }
 
-      console.log('✅ Fetched emails:', data.length, 'emails')
+      console.log('✅ Fetched emails:', data.length, 'emails from', grantId === '__all_accounts__' ? 'all accounts' : 'single account')
 
       // Transform to match email UI format
       const emails = (data || []).map((item: any) => ({
@@ -234,13 +295,14 @@ export function CustomLabels({
         messageId: item.message_id,
         grant_id: item.mail_details?.grant_id || grantId,
         labelId: label.id,
-        emailAccountId: emailAccountId,
+        emailAccountId: item.email_account_id || emailAccountId,
         mailDetails: item.mail_details,
       }))
 
       setSelectedLabelId(label.id)
       if (onLabelSelect) {
-        onLabelSelect(label.id, label.name, emails, label.color)
+        const totalCount = result.totalCount || data.length
+        onLabelSelect(label.id, label.name, emails, label.color, totalCount)
       }
       if (onMailboxTypeChange) {
         onMailboxTypeChange(`label:${label.id}`)

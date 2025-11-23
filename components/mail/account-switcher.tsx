@@ -78,44 +78,49 @@ export function AccountSwitcher({
     }
   }
 
-  // Only show "Select an account" if no account is selected
+  // Only show "Select to continue" if no account is selected
   const allAccounts = React.useMemo(() => {
-    return [
-      ...(selectedAccount === "none"
-        ? [
-            {
-              label: "Select an account",
-              email: "",
-              grantId: "none",
-              icon: (
-                <div className="h-6 w-6 rounded-full bg-gray-300 flex items-center justify-center text-xs">?</div>
-              ),
-            },
-          ]
-        : []),
-      ...accounts,
-      // All Accounts option (only if multiple accounts)
-      ...(accounts.length > 1 ? [
-        {
-          label: "All Accounts",
-          email: "",
-          grantId: "__all_accounts__",
-          icon: (
-            <div className="h-6 w-6 rounded-full bg-blue-500 flex items-center justify-center text-xs text-white font-bold">A</div>
-          ),
-        },
-      ] : []),
-      // Connect new account option appended to the end
-      {
-        label: "Connect New Account",
+    const result = []
+    
+    // 1. Connect New Account - FIRST
+    result.push({
+      label: "Connect New Account",
+      email: "",
+      grantId: "__connect_new__",
+      icon: (
+        <div className="h-6 w-6 rounded-full bg-accent flex items-center justify-center text-xs text-primary font-bold">+</div>
+      ),
+    })
+    
+    // 2. All Accounts option (only if multiple accounts) - SECOND
+    if (accounts.length > 1) {
+      result.push({
+        label: "All Accounts",
         email: "",
-        grantId: "__connect_new__",
+        grantId: "__all_accounts__",
         icon: (
-          <div className="h-6 w-6 rounded-full bg-accent flex items-center justify-center text-xs text-primary">+</div>
+          <div className="h-6 w-6 rounded-full bg-primary flex items-center justify-center text-xs text-white font-bold">A</div>
         ),
-      },
-    ].filter((account) => account.grantId !== "none" || selectedAccount === "none")
+      })
+    }
+    
+    // 3. Individual connected accounts - THIRD (one by one)
+    result.push(...accounts)
+    
+    console.log(`👤 Account Switcher: Displaying ${result.length} options`, result.map(a => ({ label: a.label, grantId: a.grantId })))
+    
+    return result
   }, [selectedAccount, accounts])
+
+  // Placeholder option (shown only when nothing selected, not in dropdown)
+  const placeholderOption = {
+    label: "Select to continue",
+    email: "",
+    grantId: "none",
+    icon: (
+      <div className="h-6 w-6 rounded-full bg-gray-300 flex items-center justify-center text-xs">?</div>
+    ),
+  }
 
   return (
     <Select 
@@ -131,14 +136,27 @@ export function AccountSwitcher({
         )}
         aria-label="Select account"
       >
-        <SelectValue placeholder="Select an account">
-          {allAccounts.find((account) => account.grantId === selectedAccount)?.icon}
-          <span className={cn("ml-2", isCollapsed && "hidden")}>
-            {
-              allAccounts.find((account) => account.grantId === selectedAccount)?.label ||
-              allAccounts.find((account) => account.grantId === selectedAccount)?.email
-            }
-          </span>
+        <SelectValue placeholder="Select to continue">
+          {selectedAccount === "none" ? (
+            // Show placeholder when nothing selected
+            <>
+              {placeholderOption.icon}
+              <span className={cn("ml-2", isCollapsed && "hidden")}>
+                {placeholderOption.label}
+              </span>
+            </>
+          ) : (
+            // Show selected account
+            <>
+              {allAccounts.find((account) => account.grantId === selectedAccount)?.icon}
+              <span className={cn("ml-2", isCollapsed && "hidden")}>
+                {
+                  allAccounts.find((account) => account.grantId === selectedAccount)?.label ||
+                  allAccounts.find((account) => account.grantId === selectedAccount)?.email
+                }
+              </span>
+            </>
+          )}
         </SelectValue>
       </SelectTrigger>
       <SelectContent>
