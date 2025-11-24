@@ -13,37 +13,73 @@ export default function ConnectPage() {
   const [loading, setLoading] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [isChecking, setIsChecking] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  // Check for authenticated user
+  // Check for authenticated user - with proper session validation
   useEffect(() => {
+    let isMounted = true
+
     const checkUser = async () => {
       try {
-        setIsChecking(true)
-        const { data: { session }, error } = await supabase.auth.getSession()
+        console.log('🔍 Checking user session on /connect...')
         
-        if (error) {
-          console.error('Session error:', error)
-          // Redirect to signin if no session
-          router.push('/auth/signin')
-          return
+        // Try to get session - may need to refresh
+        let { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        
+        if (sessionError) {
+          console.error('❌ Session error:', sessionError)
+          // Try refreshing session
+          await supabase.auth.refreshSession()
+          const result = await supabase.auth.getSession()
+          session = result.data.session
         }
         
-        if (session?.user?.id) {
-          console.log('✅ User session found:', session.user.id)
-          setUserId(session.user.id)
-        } else {
-          console.warn('⚠️ No user in session, redirecting to signin')
-          router.push('/auth/signin')
+        if (!isMounted) return
+
+        if (!session?.user?.id) {
+          console.warn('⚠️ No authenticated user found after refresh attempt')
+          // Give it one more moment
+          await new Promise(resolve => setTimeout(resolve, 800))
+          
+          // Check one more time
+          const { data: { session: retrySession } } = await supabase.auth.getSession()
+          if (!retrySession?.user?.id && isMounted) {
+            console.log('❌ Redirecting to signin - no session found')
+            router.push('/auth/signin')
+            return
+          }
+          if (retrySession?.user?.id && isMounted) {
+            setUserId(retrySession.user.id)
+            setError(null)
+            setIsChecking(false)
+            return
+          }
         }
-      } catch (error) {
-        console.error('Error checking user:', error)
-        router.push('/auth/signin')
-      } finally {
-        setIsChecking(false)
+
+        console.log('✅ User session authenticated:', {
+          userId: session?.user?.id,
+          email: session?.user?.email
+        })
+        
+        if (isMounted) {
+          setUserId(session?.user?.id || null)
+          setError(null)
+          setIsChecking(false)
+        }
+      } catch (err) {
+        console.error('❌ Error checking user:', err)
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'Session check failed')
+          setIsChecking(false)
+        }
       }
     }
     
     checkUser()
+    
+    return () => {
+      isMounted = false
+    }
   }, [router])
 
   const features = [
@@ -142,22 +178,22 @@ export default function ConnectPage() {
             <ConnectAccountButton
               provider="google"
               userId={userId || ''}
-              disabled={loading || isChecking}
+              disabled={loading || isChecking || !userId}
             />
             <ConnectAccountButton
               provider="microsoft"
               userId={userId || ''}
-              disabled={loading || isChecking}
+              disabled={loading || isChecking || !userId}
             />
             <ConnectAccountButton
               provider="yahoo"
               userId={userId || ''}
-              disabled={loading || isChecking}
+              disabled={loading || isChecking || !userId}
             />
             <ConnectAccountButton
               provider="imap"
               userId={userId || ''}
-              disabled={loading || isChecking}
+              disabled={loading || isChecking || !userId}
             />
           </div>
 

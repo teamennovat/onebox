@@ -48,77 +48,64 @@ export function ConnectAccountButton({ provider, userId, disabled }: Props) {
   const handleConnect = async () => {
     setLoading(true)
     try {
-      // First verify if we have a valid user ID
-      if (!userId || userId === 'placeholder') {
-        throw new Error('Please sign in to connect an email account')
+      // Validate user ID
+      if (!userId || userId.trim() === '') {
+        console.error('❌ No user ID available for connection')
+        throw new Error('Authentication required. Please sign in first.')
       }
 
-      // First, ensure we have a valid connector for this provider
-      if (provider === 'google') {
-        try {
-          console.log('Setting up Google connector...')
-          const connectorResponse = await fetch('/api/connectors/google', { 
-            method: 'POST',
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json'
-            }
-          })
-          
-          const connectorData = await connectorResponse.json()
-          console.log('Connector setup response:', connectorData)
-          
-          // Check for specific error conditions
-          if (!connectorResponse.ok) {
-            if (connectorData.error?.includes('duplicate')) {
-              // This is actually fine, we can continue
-              console.log('Connector already exists, continuing...')
-            } else {
-              throw new Error(connectorData.error || 'Unknown connector error')
-            }
-          }
-        } catch (error) {
-          console.error('Connector setup error:', error)
-          alert(error instanceof Error ? error.message : 'Failed to set up Google connector. Please try again.')
-          return // Exit early instead of throwing
-        }
-      }
-
-      console.log(`Initiating OAuth flow for provider: ${provider}`)
-      // Then initiate the OAuth flow
-      const response = await fetch(`/api/auth/${provider}?userId=${userId}`, {
+      console.log(`🔗 Starting ${provider} OAuth connection`, {
+        provider,
+        userIdPrefix: userId.substring(0, 8) + '...',
+        timestamp: new Date().toISOString()
+      })
+      
+      // Initiate the OAuth flow
+      const response = await fetch(`/api/auth/${provider}?userId=${encodeURIComponent(userId)}`, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
           'Cache-Control': 'no-cache'
-        }
+        },
+        credentials: 'include'
       })
       
       if (!response.ok) {
-        const errorData = await response.json()
-        console.error('Auth error:', errorData)
-        throw new Error(errorData.error || 'Failed to initiate authentication')
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+        console.error(`❌ OAuth URL generation failed for ${provider}:`, {
+          status: response.status,
+          error: errorData
+        })
+        throw new Error(
+          errorData.error || 
+          errorData.details || 
+          `Failed to connect ${config.name}. Please try again.`
+        )
       }
       
       const data = await response.json()
       
       if (!data.url) {
-        console.error('Missing URL in response:', data)
-        throw new Error('No authentication URL returned')
+        console.error(`❌ No OAuth URL in response for ${provider}:`, data)
+        throw new Error(`No authentication URL generated for ${config.name}`)
       }
       
-      // Store the current URL to return to after auth
-      sessionStorage.setItem('authReturnTo', window.location.pathname)
+      // Store connection context for post-auth flow
+      try {
+        sessionStorage.setItem('authReturnTo', window.location.pathname)
+        sessionStorage.setItem('connectProvider', provider)
+        sessionStorage.setItem('connectUserId', userId)
+      } catch (e) {
+        console.warn('⚠️ Could not store session data:', e)
+      }
       
-      // Log the URL we're redirecting to (for debugging)
-      console.log('Redirecting to:', data.url)
+      console.log(`✅ OAuth URL generated for ${provider}, redirecting to Nylas...`)
       
       // Redirect to the OAuth URL
       window.location.href = data.url
     } catch (error) {
-      console.error('Error connecting account:', error)
-      alert(error instanceof Error ? error.message : 'Failed to connect account. Please try again.')
-    } finally {
+      console.error(`❌ Connection error for ${provider}:`, error instanceof Error ? error.message : error)
+      alert(error instanceof Error ? error.message : `Failed to connect ${config.name}. Please try again.`)
       setLoading(false)
     }
   }

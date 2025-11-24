@@ -26,22 +26,43 @@ export default function SignInPage() {
     setLoading(true)
 
     try {
+      console.log('🔐 Attempting sign in for:', email)
       const { data, error } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       })
 
-      if (error) throw error
+      if (error) {
+        console.error('❌ Sign in failed:', error)
+        throw error
+      }
 
-      // Successful login, wait a moment for session to be set
-      await new Promise(resolve => setTimeout(resolve, 100))
+      console.log('✅ Sign in successful, session data:', {
+        userId: data.user?.id,
+        email: data.user?.email
+      })
 
-      // Force a full page navigation to ensure middleware picks up the new session
-      window.location.href = '/connect'
+      // Wait for session to be properly persisted to cookies
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      // Verify session is available before redirecting
+      const { data: { session } } = await supabaseClient.auth.getSession()
+      if (!session) {
+        console.warn('⚠️ Session not available after signin, retrying...')
+        await new Promise(resolve => setTimeout(resolve, 300))
+      }
+
+      console.log('🔄 Redirecting to /connect')
+      // Use router.push for better client-side handling
+      router.push('/connect')
+      
+      // Also set window.location as fallback after a delay
+      setTimeout(() => {
+        window.location.href = '/connect'
+      }, 500)
     } catch (error) {
-      console.error('Sign in error:', error)
+      console.error('❌ Sign in error:', error)
       setError(error instanceof Error ? error.message : 'Failed to sign in')
-    } finally {
       setLoading(false)
     }
   }
